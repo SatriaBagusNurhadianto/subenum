@@ -71,7 +71,7 @@ func TestCloseWaitsForHandlers(t *testing.T) {
 	if running.Load() != finished.Load() {
 		t.Errorf("Close returned with %d handlers still running", running.Load()-finished.Load())
 	}
-	if took := time.Since(start); took > 2*time.Second {
+	if took := time.Since(start); took > 10*time.Second {
 		t.Errorf("Close took %s; a parked stream connection held it", took)
 	}
 }

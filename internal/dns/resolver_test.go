@@ -75,15 +75,13 @@ func TestResolveDomainWithRetryContextCancellation(t *testing.T) {
 	cancel()
 
 	timeout := time.Second
-	start := time.Now()
 	_, result := ResolveDomainWithRetry(ctx, srv.Resolver(timeout), "example.com.", timeout, nil, 5, []string{"A"})
-	elapsed := time.Since(start)
 
 	if result == OutcomeFound {
 		t.Errorf("expected cancelled context to prevent resolution")
 	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("expected near-instant return on cancelled context, took %s", elapsed)
+	if srv.Queries() != 0 {
+		t.Errorf("expected no query to reach the server on cancelled context, got %d", srv.Queries())
 	}
 }
 
