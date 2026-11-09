@@ -42,7 +42,8 @@ func Transport(server string) string {
 // testRootCAs, when set by tests, replaces the system roots for DoT and DoH.
 var testRootCAs *x509.CertPool
 
-// dialer opens one connection per DNS query, the way Go's resolver expects.
+// dialer opens a connection per DNS query, the way Go's resolver expects
+// (UDP and DoT dialers hand out pooled ones).
 // Go frames queries with a two-byte length prefix on any connection that is
 // not a net.PacketConn, which is exactly the DoT wire format; DoH adapts the
 // same framing to HTTP requests.
@@ -55,7 +56,7 @@ type idleCloser interface {
 	closeIdle()
 }
 
-// pooledDialers maps a resolver from NewResolver to its DoT or DoH dialer,
+// pooledDialers maps a resolver from NewResolver to its dialer,
 // so CloseIdleConnections can find it. Keys are weak, and an entry is
 // removed (and its connections closed) once the resolver is collected.
 var pooledDialers sync.Map // weak.Pointer[net.Resolver] -> idleCloser
@@ -74,8 +75,8 @@ func registerDialer(r *net.Resolver, d dialer) {
 	}, key)
 }
 
-// CloseIdleConnections closes the DoT connections and idle DoH connections
-// a resolver from NewResolver keeps for reuse. The resolver stays usable. A
+// CloseIdleConnections closes the UDP sockets, DoT connections and idle DoH
+// connections a resolver from NewResolver keeps for reuse. The resolver stays usable. A
 // scan calls it when it ends, so a long-lived program that scans repeatedly
 // does not hold connections open between scans.
 func CloseIdleConnections(r *net.Resolver) {
@@ -125,17 +126,100 @@ func newDialer(timeout time.Duration, server string) dialer {
 			},
 		}
 	}
-	return &udpDialer{addr: server, timeout: timeout}
+	return newUDPDialer(server, timeout)
 }
 
+// udpIdleConns bounds the UDP sockets kept for reuse; it covers a busy -t
+// without holding thousands of sockets open.
+const udpIdleConns = 512
+
+// udpDialer reuses UDP sockets between queries (#180). Opening and closing
+// a socket per query capped live scans near 10k queries per second, nearly
+// all of it in socket teardown. Reuse is safe because Go's resolver reads
+// until it gets a reply whose ID and question match the query it sent, so a
+// late answer to an earlier query on the same socket is skipped. TCP (the
+// fallback for truncated answers) still dials per query.
 type udpDialer struct {
 	addr    string
 	timeout time.Duration
+	idle    chan *net.UDPConn
+}
+
+func newUDPDialer(addr string, timeout time.Duration) *udpDialer {
+	return &udpDialer{addr: addr, timeout: timeout, idle: make(chan *net.UDPConn, udpIdleConns)}
 }
 
 func (d *udpDialer) dial(ctx context.Context, network string) (net.Conn, error) {
+	if network == "udp" {
+		select {
+		case u := <-d.idle:
+			return &pooledUDPConn{UDPConn: u, pool: d}, nil
+		default:
+		}
+	}
 	nd := net.Dialer{Timeout: d.timeout}
-	return nd.DialContext(ctx, network, d.addr)
+	c, err := nd.DialContext(ctx, network, d.addr)
+	if err != nil {
+		return nil, err
+	}
+	if u, ok := c.(*net.UDPConn); ok {
+		return &pooledUDPConn{UDPConn: u, pool: d}, nil
+	}
+	return c, nil
+}
+
+// closeIdle closes every pooled socket.
+func (d *udpDialer) closeIdle() {
+	for {
+		select {
+		case u := <-d.idle:
+			_ = u.Close()
+		default:
+			return
+		}
+	}
+}
+
+// pooledUDPConn returns its socket to the pool on Close. It embeds the
+// *net.UDPConn so it stays a net.PacketConn: Go's resolver frames messages
+// by that. A read or write that failed other than by timing out (such as an
+// ICMP port unreachable surfacing as a connection reset) closes the socket
+// for good.
+type pooledUDPConn struct {
+	*net.UDPConn
+	pool *udpDialer
+	bad  bool
+}
+
+func (c *pooledUDPConn) note(err error) {
+	var ne net.Error
+	if err != nil && (!errors.As(err, &ne) || !ne.Timeout()) {
+		c.bad = true
+	}
+}
+
+func (c *pooledUDPConn) Read(p []byte) (int, error) {
+	n, err := c.UDPConn.Read(p)
+	c.note(err)
+	return n, err
+}
+
+func (c *pooledUDPConn) Write(p []byte) (int, error) {
+	n, err := c.UDPConn.Write(p)
+	c.note(err)
+	return n, err
+}
+
+func (c *pooledUDPConn) Close() error {
+	if c.bad || c.SetDeadline(time.Time{}) != nil {
+		return c.UDPConn.Close()
+	}
+	select {
+	case c.pool.idle <- c.UDPConn:
+		return nil
+	default:
+		return c.UDPConn.Close()
+	}
 }
 
 // dotIdleMax bounds how long a DoT connection is kept for reuse. Servers

@@ -5,10 +5,12 @@ package dns
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -146,8 +148,8 @@ func NewResolver(timeout time.Duration, dnsServer string) *net.Resolver {
 			}
 			// Go frames UDP and TCP differently depending on whether the conn
 			// is a net.PacketConn, so a UDP wrapper must stay one.
-			if u, ok := c.(*net.UDPConn); ok {
-				return &rcodeUDPConn{UDPConn: u, b: b}, nil
+			if u, ok := c.(*pooledUDPConn); ok {
+				return &rcodeUDPConn{pooledUDPConn: u, b: b}, nil
 			}
 			return &rcodeTCPConn{Conn: c, b: b}, nil
 		},
@@ -203,15 +205,27 @@ func (b *wireBudget) noteRCode(msg []byte) {
 }
 
 // rcodeUDPConn records a REFUSED response as Go's resolver reads it. Each
-// Read returns one whole datagram.
+// Read returns one whole datagram. The socket is reused between queries
+// (#180), so a late answer to an earlier query can arrive first; only a
+// reply carrying the ID of a query sent on this conn counts.
 type rcodeUDPConn struct {
-	*net.UDPConn
-	b *wireBudget
+	*pooledUDPConn
+	b   *wireBudget
+	ids []uint16 // IDs of the queries written to this conn
+}
+
+func (c *rcodeUDPConn) Write(p []byte) (int, error) {
+	if len(p) >= 2 {
+		c.ids = append(c.ids, binary.BigEndian.Uint16(p))
+	}
+	return c.pooledUDPConn.Write(p)
 }
 
 func (c *rcodeUDPConn) Read(p []byte) (int, error) {
-	n, err := c.UDPConn.Read(p)
-	c.b.noteRCode(p[:n])
+	n, err := c.pooledUDPConn.Read(p)
+	if n >= 2 && slices.Contains(c.ids, binary.BigEndian.Uint16(p)) {
+		c.b.noteRCode(p[:n])
+	}
 	return n, err
 }
 
