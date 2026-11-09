@@ -284,6 +284,7 @@ make help           # list all targets
 | `-seed <n>` | `0` | Simulation seed; the same seed reproduces the same results (line order can vary unless `-t 1`). `0` picks a random seed and prints it |
 | `-simulate-zone <file>` | n/a | Lab mode: answer every query from a scenario file via a local DNS server on `127.0.0.1`; no traffic leaves the machine. See [Labs](docs/labs.md) |
 | `-diff <file>` | n/a | Compare with a previous results file (any format): print only names added (`+`) or removed (`-`), exit `4` when anything changed. See [Monitoring](docs/monitoring.md) |
+| `-diff-records` | `false` | With `-diff`, also report names whose records changed (`~`): a re-pointed CNAME or moved addresses, compared over the `-type` record types. Needs a JSON, JSONL or CSV `-diff` file |
 | `-r <file>` | n/a | Resolver pool: one `ip` or `ip:port` per line. Lookups rotate over the healthy resolvers (a resolver failing over half its recent lookups is benched for 30s), retries go to a different resolver, and every hit is re-validated against `-dns-server`, whose answer is the one reported. NXDOMAIN answers are checked too: each resolver is periodically asked about a name `-dns-server` confirmed (a canary), and an NXDOMAIN from one that has not passed a canary is confirmed by a second resolver. A resolver contradicted three times is flagged and dropped for the run. Preflight and wildcard checks use `-dns-server` |
 | `-exclude <list>` | n/a | Comma-separated out-of-scope names: exact (`vpn.example.com`) or `*.parent` (every name below `parent`, not `parent` itself). Excluded names are never queried, probed or expanded, and are counted as `excluded` |
 | `-exclude-file <file>` | n/a | Same patterns, one per line (`#` comments allowed), e.g. a bug-bounty program's out-of-scope list |
@@ -376,7 +377,7 @@ The resumed run refuses to start if an input file, the wordlist (including the b
 | `1` | A scan, the wordlist, the domain list or the output file failed |
 | `2` | Invalid flags or arguments |
 | `3` | `-dL`: some targets failed while others completed |
-| `4` | `-diff`: names were added or removed since the previous run |
+| `4` | `-diff`: names were added or removed (or, with `-diff-records`, changed) since the previous run |
 | `130` | Interrupted (SIGINT, `Ctrl+C`); partial results are kept |
 | `143` | Terminated (SIGTERM); partial results are kept |
 

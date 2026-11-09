@@ -43,6 +43,28 @@ subenum -w wordlist.txt -format jsonl -diff previous.jsonl -o current.jsonl exam
   object with the `added` and `removed` counts, plus `still_resolving` and
   `unverified` when there were any.
 
+### Record changes: `-diff-records`
+
+A name can stay in place while what it points at moves. A CNAME re-pointed
+at an unclaimed service is a takeover waiting to happen, and plain `-diff`
+reports it as unchanged. Add `-diff-records` to also compare the records of
+every name found again:
+
+```bash
+subenum -w wordlist.txt -format jsonl -type A,AAAA,CNAME -diff previous.jsonl -diff-records -o current.jsonl example.com
+```
+
+- A changed name is printed as `~ name` (with `-show-records`, the new
+  records and `(was ...)`), or carries `"change": "changed"` and
+  `"previous_records"` in JSON and JSONL. It counts as `changed` in the report's
+  `diff` object, and the exit code is `4`.
+- Records are compared as sets, over the record types this run looks up, so
+  use the same `-type` as the previous run. When either side has a CNAME, only
+  the CNAME targets are compared: the addresses behind a CDN alias rotate with
+  every TTL and would otherwise flag every CDN host.
+- The previous file must carry records: JSON, JSONL or CSV. A text file has
+  none, so the comparison falls back to names with a note.
+
 ## The subenum GitHub Action
 
 The repository is also a GitHub Action. It installs a release (checked against
@@ -88,14 +110,14 @@ jobs:
 | `domain` / `domains-file` | | What to scan (one of them) |
 | `wordlist` | bundled top 5000 | `-w` |
 | `args` | | Extra flags, space-separated |
-| `previous` | | A previous results file to diff against |
+| `previous` | | A previous results file to diff against (add `-diff-records` to `args` to also catch record changes) |
 | `baseline-artifact` | | Artifact name for the baseline: downloaded before, replaced after a complete run |
 | `sarif` | | Write takeover candidates as SARIF |
 | `max-duration` | | Time budget, e.g. `20m` (`-max-duration`). Keep it under the job's `timeout-minutes`: a job killed by its timeout leaves no report, while a scan that reaches its budget stops testing new names and still writes results and a `degraded` report |
 | `fail-on` | `unreliable` | Fail on this verdict or worse: `unreliable`, `degraded` or `never` |
 | `version` | `latest` | Release to install, or `source` to build the action's checkout |
 
-Outputs: `verdict`, `found`, `added`, `removed`, and the paths `results` (JSONL)
+Outputs: `verdict`, `found`, `added`, `removed`, `changed` (with `-diff-records`), and the paths `results` (JSONL)
 and `stats` (the run-quality report). The step below builds the same thing by
 hand, if you prefer to see every command.
 

@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/TMHSDigital/subenum/internal/dns"
 )
 
 // labTimingArgs gives lab runs a generous per-query timeout and retries. The
@@ -155,6 +157,86 @@ func TestE2EMaxDuration(t *testing.T) {
 
 	if code, _ := runCLI(t, "", "-simulate", "-max-duration", "-1s", "example.com"); code != exitUsage {
 		t.Errorf("negative -max-duration: exit %d, want %d", code, exitUsage)
+	}
+}
+
+// TestE2EDiffRecords covers #189: with -diff-records a name found again
+// with a re-pointed CNAME or a moved address is reported as changed, with
+// its previous records, counted in the report and exit code 4. Without the
+// flag, or against a text baseline, only names are compared.
+func TestE2EDiffRecords(t *testing.T) {
+	zone := filepath.Join("examples", "labs", "lab1-first-scan.zone")
+	// Lab 1 as it was "last week": blog pointed at the blog host, www had
+	// another address, and shop's alias (and the address behind it) is as
+	// now, so it must not be flagged.
+	baseline := writeFile(t, "previous.jsonl", strings.Join([]string{
+		`{"subdomain":"jenkins.lab.example","records":[{"type":"A","value":"192.0.2.40"}]}`,
+		`{"subdomain":"mail.lab.example","records":[{"type":"A","value":"192.0.2.20"}]}`,
+		`{"subdomain":"www.lab.example","records":[{"type":"A","value":"192.0.2.99"}]}`,
+		`{"subdomain":"vpn.lab.example","records":[{"type":"A","value":"192.0.2.30"}]}`,
+		`{"subdomain":"blog.lab.example","records":[{"type":"CNAME","value":"blog-host.example.net"}]}`,
+		`{"subdomain":"shop.lab.example","records":[{"type":"A","value":"192.0.2.77"},{"type":"CNAME","value":"www.lab.example"}]}`,
+		`{"type":"summary","schema":1}`,
+	}, "\n")+"\n")
+	scanArgs := func(extra ...string) []string {
+		args := append([]string{"-progress=false", "-format", "jsonl", "-type", "A,CNAME", "-w", "examples/labs/words.txt"}, labTimingArgs...)
+		return append(append(args, extra...), "-simulate-zone", zone, "lab.example")
+	}
+	type line struct {
+		Type      string       `json:"type"`
+		Subdomain string       `json:"subdomain"`
+		Change    string       `json:"change"`
+		Previous  []dns.Record `json:"previous_records"`
+		Diff      *struct {
+			Changed int `json:"changed"`
+		} `json:"diff"`
+	}
+	parse := func(out string) (changes map[string]line, summary line) {
+		changes = map[string]line{}
+		for _, raw := range strings.Split(strings.TrimSpace(out), "\n") {
+			var l line
+			if err := json.Unmarshal([]byte(raw), &l); err != nil {
+				t.Fatalf("%v: %s", err, raw)
+			}
+			if l.Type == "summary" {
+				summary = l
+			} else {
+				changes[l.Subdomain] = l
+			}
+		}
+		return changes, summary
+	}
+
+	code, out := runCLI(t, "", scanArgs("-diff", baseline, "-diff-records")...)
+	if code != exitChanges {
+		t.Fatalf("exit %d, want %d\n%s", code, exitChanges, out)
+	}
+	changes, summary := parse(out)
+	blog, www := changes["blog.lab.example"], changes["www.lab.example"]
+	if blog.Change != "changed" || len(blog.Previous) != 1 || blog.Previous[0].Value != "blog-host.example.net" {
+		t.Errorf("blog = %+v, want changed from blog-host.example.net", blog)
+	}
+	if www.Change != "changed" || len(www.Previous) != 1 || www.Previous[0].Value != "192.0.2.99" {
+		t.Errorf("www = %+v, want changed from 192.0.2.99", www)
+	}
+	if _, ok := changes["shop.lab.example"]; ok || len(changes) != 2 {
+		t.Errorf("changes %v, want only blog and www (shop's alias is unchanged)", changes)
+	}
+	if summary.Diff == nil || summary.Diff.Changed != 2 {
+		t.Errorf("summary diff %+v, want changed 2", summary.Diff)
+	}
+
+	// Without the flag the names match: nothing to report.
+	if code, out := runCLI(t, "", scanArgs("-diff", baseline)...); code != exitOK {
+		t.Errorf("without -diff-records: exit %d, want %d\n%s", code, exitOK, out)
+	}
+	// A text baseline has no records to compare.
+	text := writeFile(t, "previous.txt", "jenkins.lab.example\nmail.lab.example\nwww.lab.example\nvpn.lab.example\nblog.lab.example\nshop.lab.example\n")
+	if code, out := runCLIMerged(t, scanArgs("-diff", text, "-diff-records")...); code != exitOK || !strings.Contains(out, "only names are compared") {
+		t.Errorf("text baseline: exit %d, want %d with a note\n%s", code, exitOK, out)
+	}
+	if code, _ := runCLI(t, "", "-simulate", "-diff-records", "example.com"); code != exitUsage {
+		t.Errorf("-diff-records without -diff: exit %d, want %d", code, exitUsage)
 	}
 }
 

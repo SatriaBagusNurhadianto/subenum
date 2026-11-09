@@ -50,6 +50,7 @@ type DiffSummary struct {
 	Previous       string `json:"previous"`
 	Added          int    `json:"added"`
 	Removed        int    `json:"removed"`
+	Changed        int    `json:"changed,omitempty"` // -diff-records: names whose records changed (#189)
 	StillResolving int    `json:"still_resolving,omitempty"`
 	Unverified     int    `json:"unverified,omitempty"`
 }

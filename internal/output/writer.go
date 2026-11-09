@@ -57,8 +57,11 @@ type Result struct {
 	// Takeover is a DNS-only subdomain-takeover hint ("dangling",
 	// "provider:<name>" or "dangling:<name>"); verify it by hand (#71).
 	Takeover string `json:"takeover_candidate,omitempty"`
-	// Change is "added" or "removed" in -diff mode (#84).
+	// Change is "added" or "removed" in -diff mode (#84), or "changed" with
+	// -diff-records when a name's records differ from the baseline (#189).
 	Change string `json:"change,omitempty"`
+	// PreviousRecords are the baseline's records of a "changed" name.
+	PreviousRecords []dns.Record `json:"previous_records,omitempty"`
 	// Permutation marks a name found by the -permute pass (#72).
 	Permutation bool `json:"permutation,omitempty"`
 }
@@ -124,13 +127,17 @@ func (w *Writer) SetProgressLines(lines bool) { w.lineMode = lines }
 // (#128). Error and Notice still print.
 func (w *Writer) SetQuiet(quiet bool) { w.quiet = quiet }
 
-// SetDiff switches to -diff output (#84): text lines get a "+ " or "- "
-// prefix and CSV gains a change column. JSON and JSONL carry Change as is.
+// SetDiff switches to -diff output (#84): text lines get a "+ ", "- " or
+// "~ " (changed) prefix and CSV gains a change column. JSON and JSONL carry
+// Change as is.
 func (w *Writer) SetDiff(on bool) { w.diff = on }
 
 func diffPrefix(change string) string {
-	if change == "removed" {
+	switch change {
+	case "removed":
 		return "- "
+	case "changed":
+		return "~ "
 	}
 	return "+ "
 }
@@ -191,6 +198,9 @@ func (w *Writer) writeText(res Result) {
 		line += formatRecords(res.Records)
 		if res.Takeover != "" {
 			line += " TAKEOVER?=" + res.Takeover
+		}
+		if len(res.PreviousRecords) > 0 {
+			line += " (was" + formatRecords(res.PreviousRecords) + ")"
 		}
 	}
 	if w.stdout {

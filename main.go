@@ -61,7 +61,7 @@ const (
 	exitFailure = 1 // a scan, the wordlist, the domain list or the output file failed
 	exitUsage   = 2 // invalid flags or arguments
 	exitPartial = 3 // -dL: some targets failed while others completed
-	exitChanges = 4 // -diff: names were added or removed since the previous run
+	exitChanges = 4 // -diff: names were added or removed (or, with -diff-records, changed) since the previous run
 )
 
 const exitCodesHelp = `Exit codes:
@@ -69,7 +69,7 @@ const exitCodesHelp = `Exit codes:
   1    a scan, the wordlist, the domain list or the output file failed
   2    invalid flags or arguments
   3    -dL: some targets failed while others completed
-  4    -diff: names were added or removed since the previous run
+  4    -diff: names were added or removed (or, with -diff-records, changed) since the previous run
   130  interrupted (SIGINT, Ctrl+C); partial results are kept
   143  terminated (SIGTERM); partial results are kept
 `
@@ -151,6 +151,7 @@ type cliFlags struct {
 	excludeFile  string
 	resolvers    string          // -r: file of resolver addresses for a pool
 	diff         string          // -diff: previous results file to compare against
+	diffRecords  bool            // -diff-records: also report names whose records changed (#189)
 	stateFile    string          // where an interrupted run saves its resume state
 	resumeFrom   int             // per target, set while resuming (#73)
 	resumeNames  []string        // per target, names found before the interrupt
@@ -211,6 +212,7 @@ func parseFlagsWith(args []string, applyDefaults func(*flag.FlagSet) error) (cli
 	fs.StringVar(&f.stateFile, "state", defaultStateFile, "Where an interrupted run saves its state for -resume")
 	fs.String("resume", "", "Resume an interrupted run from its state file (no other arguments)")
 	fs.StringVar(&f.diff, "diff", "", "Previous results file (any -format); report only names added or removed since then, and exit 4 when there are changes")
+	fs.BoolVar(&f.diffRecords, "diff-records", false, "With -diff, also report names whose records changed (a re-pointed CNAME, moved addresses), compared over the -type record types; needs a json, jsonl or csv -diff file")
 	fs.StringVar(&f.resolvers, "r", "", "File of resolvers (ip or ip:port, one per line) to spread queries over; every hit is re-validated against -dns-server")
 	fs.Usage = func() {
 		w := fs.Output()
@@ -335,6 +337,10 @@ func validateFlags(f cliFlags, positionals []string, fs *flag.FlagSet, out *outp
 	}
 	if f.maxDuration < 0 {
 		out.Error("-max-duration must be 0 (unlimited) or positive, got %s", f.maxDuration)
+		return "", false
+	}
+	if f.diffRecords && f.diff == "" {
+		out.Error("-diff-records compares records against a previous results file; add -diff <file>")
 		return "", false
 	}
 	if f.concurrency > highConcurrency {
@@ -730,12 +736,15 @@ func run() (code int) {
 
 	var diff *differ
 	if f.diff != "" {
-		previous, err := loadPrevious(f.diff)
+		previous, err := loadBaseline(f.diff)
 		if err != nil {
 			out.Error("reading -diff file: %v", err)
 			return exitFailure
 		}
-		diff = &differ{previous: previous, current: map[string]struct{}{}}
+		diff = &differ{previous: previous.names, current: map[string]struct{}{}}
+		if f.diffRecords && !diff.withRecords(previous, recordTypes) {
+			out.Info("Note: -diff-records: %s has no records (text format), so only names are compared; save results with -format jsonl, json or csv", f.diff)
+		}
 	}
 
 	combined, outFile, ok := openOutputFile(f.outputFile, f.testMode, format, out)
@@ -788,8 +797,8 @@ func run() (code int) {
 		if fileOut != nil {
 			fileOut.Emit(res)
 		}
-		if diff.observe(ev.Domain) {
-			res.Change = "added"
+		if change, previous := diff.observe(ev.Domain, ev.Records); change != "" {
+			res.Change, res.PreviousRecords = change, previous
 			out.Emit(res)
 		}
 	}
@@ -1039,7 +1048,7 @@ func run() (code int) {
 	// The run-quality report (#70): the last jsonl line, and the -stats file.
 	summary := buildSummary(f, targets, status, results, started, time.Since(started))
 	if diff != nil {
-		summary.Diff = &output.DiffSummary{Previous: f.diff, Added: diff.added}
+		summary.Diff = &output.DiffSummary{Previous: f.diff, Added: diff.added, Changed: diff.changed}
 		summary.QueriesSent += emitRemoved(ctx, diff, targets, f, maxAttempts, recordTypes, summary.Diff, summary.Verdict, summary.Reason, out)
 		if fileOut != nil {
 			fileOut.Summary(summary)
@@ -1087,7 +1096,7 @@ func run() (code int) {
 	if anyFailed {
 		return exitFailure
 	}
-	if diff != nil && diff.added+diff.removed > 0 {
+	if diff != nil && diff.added+diff.removed+diff.changed > 0 {
 		return exitChanges
 	}
 	return exitOK

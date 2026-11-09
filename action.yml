@@ -71,6 +71,9 @@ outputs:
   removed:
     description: Names removed since the previous results.
     value: ${{ steps.scan.outputs.removed }}
+  changed:
+    description: Names whose records changed since the previous results (add -diff-records to args).
+    value: ${{ steps.scan.outputs.changed }}
   results:
     description: Path of the full results (JSONL).
     value: ${{ steps.scan.outputs.results }}
@@ -178,8 +181,9 @@ runs:
         found=$(jq '[.targets[].found] | add // 0' "$out/run.json")
         added=$(jq '.diff.added // 0' "$out/run.json")
         removed=$(jq '.diff.removed // 0' "$out/run.json")
+        changed=$(jq '.diff.changed // 0' "$out/run.json")
         {
-          echo "verdict=$verdict"; echo "found=$found"; echo "added=$added"; echo "removed=$removed"
+          echo "verdict=$verdict"; echo "found=$found"; echo "added=$added"; echo "removed=$removed"; echo "changed=$changed"
           echo "results=$out/results.jsonl"; echo "stats=$out/run.json"
         } >> "$GITHUB_OUTPUT"
 
@@ -193,9 +197,10 @@ runs:
           jq -r '.targets[] | "| \(.domain) | \(.verdict) | \(.found // 0) | \(.queries_sent // 0) |"' "$out/run.json"
           if [ -n "$prev" ]; then
             echo
-            echo "**Changes since the previous results:** $added added, $removed removed."
+            echo "**Changes since the previous results:** $added added, $removed removed, $changed changed."
             jq -r 'select(.change == "added") | "- `+ \(.subdomain)`"' "$out/changes.jsonl" | head -50
             jq -r 'select(.change == "removed") | "- `- \(.subdomain)`"' "$out/changes.jsonl" | head -50
+            jq -r 'select(.change == "changed") | "- `~ \(.subdomain)`: \([.previous_records[]? | "\(.type) \(.value)"] | join(", ")) -> \([.records[] | "\(.type) \(.value)"] | join(", "))"' "$out/changes.jsonl" | head -50
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 

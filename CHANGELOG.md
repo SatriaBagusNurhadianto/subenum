@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `-max-duration 20m` gives a run a time budget. When it runs out no new names are tested, lookups already under way finish, and the run ends normally: results, the `-stats` report (`stopped_by: "duration"`, untested names in `skipped_by_cap`) and a `degraded` verdict. Under `-dL` one budget covers every target. The GitHub Action gains a `max-duration` input, so a scheduled scan can stop before the job's `timeout-minutes` kills it without a report, and `pkg/subenum` gains `Config.MaxDuration` and `Stats.Expired`. With `-max-queries`, the report now says `stopped_by: "queries"` (#190).
+- `-diff-records` makes `-diff` compare the records of names found again, so a CNAME re-pointed at an unclaimed service or a moved address is reported as `changed` (`~ name` in text; `"change": "changed"` with `previous_records` in JSON and JSONL), counted in the report's `diff.changed`, and exits 4. When either side has a CNAME only the alias targets are compared, so CDN address rotation is not a change. The previous file must be JSON, JSONL or CSV. The GitHub Action gains a `changed` output (#189).
 
 ### Changed
 - Tests no longer flake under load: lab end-to-end runs use a 5 s timeout with 3 attempts and fail with a clear message if the lab 2 wildcard probe times out, the resolver-pool spread test counts lookups per member instead of timing the scan (the timing view is now `BenchmarkPoolSpreadsLoad`), and CI runs tests in shuffled order (#167).
