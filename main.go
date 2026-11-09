@@ -1067,7 +1067,10 @@ func run() (code int) {
 			fileErrReported = true
 		}
 	}
-	if anyDone {
+	// -format json streams its array (#181): results already written, such
+	// as ones restored by -resume before the target failed, are closed into
+	// a valid document even when no scan finished.
+	if anyDone || out.Started() || (fileOut != nil && fileOut.Started()) {
 		if fileOut != nil {
 			if err := fileOut.Finish(); err != nil {
 				out.Error("writing output file: %v", err)

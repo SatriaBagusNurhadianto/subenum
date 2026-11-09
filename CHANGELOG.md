@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Live UDP scans reuse sockets instead of opening and closing one per query, which capped throughput near 10k queries per second with nearly all CPU in socket teardown. A 100k-name scan against a loopback server now takes about 2 s instead of 12 s at `-t 200`. A late answer to an earlier query on a reused socket is ignored, as before, and cannot make a lookup count as refused (#180).
+- `-format json` streams its array instead of holding every result and then encoding the whole document, so its peak memory matches `-format jsonl` (a 300k-result run: about 200 MB instead of 420 MB). The output is byte for byte the same (#181).
 - Tests no longer flake under load: lab end-to-end runs use a 5 s timeout with 3 attempts and fail with a clear message if the lab 2 wildcard probe times out, the resolver-pool spread test counts lookups per member instead of timing the scan (the timing view is now `BenchmarkPoolSpreadsLoad`), and CI runs tests in shuffled order (#167).
 
 ### Fixed

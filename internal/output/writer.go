@@ -4,6 +4,7 @@ package output
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -92,7 +93,9 @@ type Writer struct {
 	diff           bool   // -diff output: +/- prefixes and a CSV change column
 	headerDone     bool   // text file header written
 
-	buffered  []Result // FormatJSON: accumulated until Finish
+	jsonOpen  bool          // FormatJSON: the array's "[" and first element are written (#181)
+	jsonBuf   bytes.Buffer  // FormatJSON: one element, reused
+	jsonEnc   *json.Encoder // FormatJSON: writes into jsonBuf
 	csvStdout *csv.Writer
 	csvFile   *csv.Writer
 	csvInit   bool
@@ -154,7 +157,8 @@ func (w *Writer) SetSeed(seed uint64) { w.seed = seed }
 func (w *Writer) SetShowRecords(show bool) { w.records = show }
 
 // Result records a resolved domain. In text mode it prints immediately; in JSON
-// mode it is buffered for Finish; in CSV and JSONL mode it is streamed.
+// mode it is streamed as an array element that Finish closes; in CSV and
+// JSONL mode it is streamed.
 func (w *Writer) Result(domain string, records []dns.Record) {
 	w.ResultWithHint(domain, records, "")
 }
@@ -179,7 +183,7 @@ func (w *Writer) Emit(res Result) {
 
 	switch w.format {
 	case FormatJSON:
-		w.buffered = append(w.buffered, res)
+		w.writeJSONElement(res)
 	case FormatCSV:
 		w.writeCSVRows(res)
 	case FormatJSONL:
@@ -237,6 +241,46 @@ func formatRecords(records []dns.Record) string {
 		b.WriteString(" " + r.Type + "=" + r.Value)
 	}
 	return b.String()
+}
+
+// writeJSONElement streams one element of the -format json array (#181).
+// Each element is indented as json.MarshalIndent indents a whole slice, so
+// the output is byte for byte what encoding every result at once gave,
+// without holding the results or the document in memory.
+// The encoder and its buffer are reused, so an element costs no garbage
+// beyond what encoding/json itself pools.
+func (w *Writer) writeJSONElement(res Result) {
+	if w.jsonEnc == nil {
+		w.jsonEnc = json.NewEncoder(&w.jsonBuf)
+		w.jsonEnc.SetIndent("  ", "  ")
+	}
+	w.jsonBuf.Reset()
+	if w.jsonOpen {
+		w.jsonBuf.WriteString(",\n  ")
+	} else {
+		w.jsonBuf.WriteString("[\n  ")
+	}
+	if err := w.jsonEnc.Encode(res); err != nil {
+		_, _ = fmt.Fprintf(w.errOut(), "Error: encoding JSON output: %v\n", err)
+		return
+	}
+	w.jsonOpen = true
+	data := bytes.TrimSuffix(w.jsonBuf.Bytes(), []byte("\n")) // Encode ends each value with a newline
+	if w.stdout {
+		_, _ = os.Stdout.Write(data)
+	}
+	if w.outWriter != nil {
+		_, _ = w.outWriter.Write(data)
+	}
+}
+
+// Started reports whether -format json output has begun: its array is open
+// and only Finish closes it, so a caller that skips Finish on an error path
+// must still call it once Started is true.
+func (w *Writer) Started() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.jsonOpen
 }
 
 func (w *Writer) writeJSONL(res Result) {
@@ -318,19 +362,16 @@ func (w *Writer) Finish() error {
 
 	switch w.format {
 	case FormatJSON:
-		results := w.buffered
-		if results == nil {
-			results = []Result{}
+		end := "\n]\n"
+		if !w.jsonOpen {
+			end = "[]\n"
 		}
-		data, err := json.MarshalIndent(results, "", "  ")
-		if err != nil {
-			return fmt.Errorf("encoding JSON output: %w", err)
-		}
+		w.jsonOpen = false
 		if w.stdout {
-			fmt.Printf("%s\n", data)
+			fmt.Print(end)
 		}
 		if w.outWriter != nil {
-			if _, err := fmt.Fprintf(w.outWriter, "%s\n", data); err != nil {
+			if _, err := w.outWriter.WriteString(end); err != nil {
 				return err
 			}
 		}

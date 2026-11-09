@@ -2,6 +2,7 @@ package output
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -214,6 +215,41 @@ func TestWriterResultJSONFile(t *testing.T) {
 	}
 	if results[0].Subdomain != "www.example.com" || results[0].Records[0].Type != "A" {
 		t.Errorf("unexpected first result: %+v", results[0])
+	}
+}
+
+// TestWriterJSONStreamsSameBytes covers #181: the streamed -format json
+// array is byte for byte what encoding every result at once produced.
+func TestWriterJSONStreamsSameBytes(t *testing.T) {
+	results := []Result{
+		{Subdomain: "www.example.com", Records: []dns.Record{{Type: "A", Value: "192.0.2.1"}, {Type: "AAAA", Value: "2001:db8::1"}}},
+		{Subdomain: "blog.example.com", Records: []dns.Record{{Type: "CNAME", Value: "ghost.example.net"}}, Takeover: "dangling"},
+		{Subdomain: "old.example.com", Change: "removed"},
+	}
+	for _, n := range []int{0, 1, len(results)} {
+		var buf bytes.Buffer
+		bw := bufio.NewWriter(&buf)
+		w := NewFile(bw, false, FormatJSON)
+		for _, r := range results[:n] {
+			w.Emit(r)
+		}
+		if w.Started() != (n > 0) {
+			t.Errorf("%d results: Started = %v", n, w.Started())
+		}
+		if err := w.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		want := results[:n]
+		if n == 0 {
+			want = []Result{}
+		}
+		golden, err := json.MarshalIndent(want, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := buf.String(); got != string(golden)+"\n" {
+			t.Errorf("%d results:\ngot  %q\nwant %q", n, got, string(golden)+"\n")
+		}
 	}
 }
 
