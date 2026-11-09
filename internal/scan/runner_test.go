@@ -718,7 +718,7 @@ func startUDPDNS(t *testing.T, handle func(name string, qtype uint16) ([4]byte, 
 // time, so a handler that sleeps throttles it like a rate-limited resolver.
 // Names without a hit are NXDOMAIN; a hit name answers A with ip and NODATA
 // for other types. The server stops on test cleanup; stop is kept for callers.
-func startUDPDNSAction(t *testing.T, handle func(name string) dnsAction) (addr string, stop func()) {
+func startUDPDNSAction(t testing.TB, handle func(name string) dnsAction) (addr string, stop func()) {
 	t.Helper()
 	srv := dnstest.StartWith(t, dnstest.Options{Serial: true}, func(q dnstest.Query) dnstest.Reply {
 		act := handle(q.Name)

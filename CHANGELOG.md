@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Tests no longer flake under load: lab end-to-end runs use a 5 s timeout with 3 attempts and fail with a clear message if the lab 2 wildcard probe times out, the resolver-pool spread test counts lookups per member instead of timing the scan (the timing view is now `BenchmarkPoolSpreadsLoad`), and CI runs tests in shuffled order (#167).
+
 ## [0.10.0] - 2026-11-08
 
 ### Changed

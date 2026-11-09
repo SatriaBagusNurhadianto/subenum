@@ -9,6 +9,11 @@ import (
 	"testing"
 )
 
+// labTimingArgs gives lab runs a generous per-query timeout and retries. The
+// lab server is in-process, so the CLI's 1 s default is ample on an idle
+// machine but not under -race and coverage on a busy CI runner (#167).
+var labTimingArgs = []string{"-timeout", "5000", "-attempts", "3"}
+
 // TestE2ELabs runs the shipped -simulate-zone scenarios end to end (#76) and
 // checks the answers the Labs page gives for them.
 func TestE2ELabs(t *testing.T) {
@@ -53,14 +58,21 @@ func TestE2ELabs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			args := append([]string{"-progress=false", "-w", words}, c.args...)
-			code, out := runCLI(t, "", args...)
+			args := append(append([]string{"-progress=false", "-w", words}, labTimingArgs...), c.args...)
+			code, out := runCLIMerged(t, args...)
 			if code != c.code {
 				t.Fatalf("exit %d, want %d\n%s", code, c.code, out)
 			}
+			// A timed-out wildcard probe makes -force report every word,
+			// which is the regression lab 2 exists to catch; name it.
+			if strings.Contains(out, "wildcard detection failed") {
+				t.Fatalf("wildcard probe failed, so results were not filtered:\n%s", out)
+			}
+			// Results are bare hostnames; diagnostics share the stream.
 			var got []string
 			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-				if line == "" {
+				line = strings.TrimSpace(line)
+				if strings.ContainsAny(line, " \t") || !strings.HasSuffix(line, ".lab.example") {
 					continue
 				}
 				got = append(got, strings.TrimSuffix(line, ".lab.example"))
@@ -111,8 +123,9 @@ func TestE2ELabVerdicts(t *testing.T) {
 // TestE2ELabTakeoverHint checks lab 1's dangling CNAME: the external target
 // does not exist in the lab, so the result is flagged.
 func TestE2ELabTakeoverHint(t *testing.T) {
-	code, out := runCLI(t, "", "-progress=false", "-w", "examples/labs/words.txt", "-format", "jsonl",
-		"-type", "A,AAAA,CNAME", "-simulate-zone", filepath.Join("examples", "labs", "lab1-first-scan.zone"), "lab.example")
+	args := append([]string{"-progress=false", "-w", "examples/labs/words.txt", "-format", "jsonl"}, labTimingArgs...)
+	code, out := runCLI(t, "", append(args,
+		"-type", "A,AAAA,CNAME", "-simulate-zone", filepath.Join("examples", "labs", "lab1-first-scan.zone"), "lab.example")...)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -175,7 +188,8 @@ func TestE2ELabRefusesEnvAndConfigResolvers(t *testing.T) {
 func TestE2ESARIF(t *testing.T) {
 	zone := filepath.Join("examples", "labs", "lab1-first-scan.zone")
 	path := filepath.Join(t.TempDir(), "takeovers.sarif")
-	if code, _ := runCLI(t, "", "-progress=false", "-type", "A,CNAME", "-sarif", path, "-simulate-zone", zone, "lab.example"); code != 0 {
+	args := append([]string{"-progress=false"}, labTimingArgs...)
+	if code, _ := runCLI(t, "", append(args, "-type", "A,CNAME", "-sarif", path, "-simulate-zone", zone, "lab.example")...); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
 	data, err := os.ReadFile(path)

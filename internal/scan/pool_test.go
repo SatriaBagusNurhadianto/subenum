@@ -31,36 +31,70 @@ func runPool(t *testing.T, cfg Config) (*Event, []Event) {
 	return done, errs
 }
 
-// TestPoolSpreadsLoad is #69's "measurably faster" check: the same scan over
-// 20 slow resolvers finishes far sooner than over one.
+// TestPoolSpreadsLoad is #69's load-spreading check without a wall-clock
+// assertion (#167): every member of a 20-resolver pool takes part, and none
+// carries more than its share. BenchmarkPoolSpreadsLoad keeps the timing view.
 func TestPoolSpreadsLoad(t *testing.T) {
-	if testing.Short() {
-		t.Skip("timing-sensitive")
-	}
 	trusted := slowServer(t, 0)
 	var many []string
 	for i := 0; i < 20; i++ {
-		many = append(many, slowServer(t, 15*time.Millisecond))
+		many = append(many, slowServer(t, 0))
 	}
-	scan := func(pool []string) time.Duration {
-		cfg := Config{
-			Domain: "example.com", Entries: makeEntries(60), Concurrency: 20,
-			Timeout: 2 * time.Second, Attempts: 1, Types: []string{"A"},
-			Resolver: dns.NewResolver(2*time.Second, trusted), DNSServer: trusted,
-			Pool: dns.NewPool(pool, 2*time.Second),
-		}
-		start := time.Now()
-		done, errs := runPool(t, cfg)
-		if len(errs) != 0 || done.Processed != 60 {
-			t.Fatalf("errs=%v processed=%d", errs, done.Processed)
-		}
-		return time.Since(start)
+	pool := dns.NewPool(many, 5*time.Second)
+	cfg := Config{
+		Domain: "example.com", Entries: makeEntries(60), Concurrency: 20,
+		Timeout: 5 * time.Second, Attempts: 3, Types: []string{"A"},
+		Resolver: dns.NewResolver(5*time.Second, trusted), DNSServer: trusted,
+		Pool: pool,
 	}
-	one := scan(many[:1])
-	twenty := scan(many)
-	t.Logf("1 resolver: %s, 20 resolvers: %s", one, twenty)
-	if twenty*3 > one {
-		t.Fatalf("20 resolvers took %s, 1 took %s; want at least 3x faster", twenty, one)
+	done, errs := runPool(t, cfg)
+	if len(errs) != 0 || done.Processed != 60 {
+		t.Fatalf("errs=%v processed=%d", errs, done.Processed)
+	}
+	stats := pool.Stats()
+	var total int64
+	for _, s := range stats {
+		total += s.Lookups
+	}
+	for _, s := range stats {
+		if s.Lookups == 0 {
+			t.Errorf("resolver %s got no lookups; the pool did not spread the load: %+v", s.Addr, stats)
+		}
+		if s.Lookups*4 > total {
+			t.Errorf("resolver %s got %d of %d lookups; want at most a quarter", s.Addr, s.Lookups, total)
+		}
+	}
+}
+
+// BenchmarkPoolSpreadsLoad compares a scan over one slow resolver with the
+// same scan over twenty; run with -bench to see the speedup.
+func BenchmarkPoolSpreadsLoad(b *testing.B) {
+	for _, size := range []int{1, 20} {
+		b.Run(map[int]string{1: "one", 20: "twenty"}[size], func(b *testing.B) {
+			trusted, stopT := startUDPDNSAction(b, func(string) dnsAction { return dnsAction{} })
+			defer stopT()
+			var pool []string
+			for i := 0; i < size; i++ {
+				addr, stop := startUDPDNSAction(b, func(string) dnsAction {
+					time.Sleep(15 * time.Millisecond)
+					return dnsAction{}
+				})
+				defer stop()
+				pool = append(pool, addr)
+			}
+			for i := 0; i < b.N; i++ {
+				cfg := Config{
+					Domain: "example.com", Entries: makeEntries(60), Concurrency: 20,
+					Timeout: 2 * time.Second, Attempts: 1, Types: []string{"A"},
+					Resolver: dns.NewResolver(2*time.Second, trusted), DNSServer: trusted,
+					Pool: dns.NewPool(pool, 2*time.Second),
+				}
+				events := make(chan Event, 256)
+				go Run(context.Background(), cfg, events)
+				for range events {
+				}
+			}
+		})
 	}
 }
 
