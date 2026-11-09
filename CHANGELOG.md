@@ -7,11 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-08
+
 ### Changed
 - Engine messages no longer hard-code command-line flags. They name settings with neutral tokens (`scan.Setting`), and each front end renders them in its own terms: the CLI as flags (unchanged output), the TUI as its form labels ("Use Force to scan anyway", "invalid Exclude pattern"), and `pkg/subenum` as `Config` fields, replacing its regexp that guessed flags out of message text. A test fails if an engine message names a flag or uses an unknown token (#100).
 - The scan engine always ends with exactly one done event, marked `Stopped` when the scan ended before testing any candidate (out of scope, recursion ceiling, failed preflight or wildcard check, a wildcard zone without `-force`, or Ctrl+C during those checks), so the CLI, the TUI and `pkg/subenum` handle one shape of ending instead of a channel that sometimes closes without one. `pkg/subenum`'s `Event` gains `Stopped`, and a stopped scan's `Stats` now include the queries its checks sent (#99).
+- `-retries`' deprecation warning goes through the normal output, so `-silent` hides it (#166).
+- The container image is built with Go 1.27.3 (from 1.27.1, picking up `crypto/tls` and `crypto/x509` fixes the `-ct` client uses) on a refreshed distroless base (#185). `golang.org/x/net` is v0.62.0 and indirect modules are on their latest patches; the `go 1.26.0` minimum is unchanged (#186).
+- CI pins govulncheck and the devcontainer images, which Dependabot now updates, and lints with golangci-lint v2.15.0 (#187).
 
 ### Fixed
+- With `-r`, a retry goes back to the healthy resolver it just used rather than to one that is benched as dead, so a pool with one live resolver no longer turns transient timeouts into failures (#148).
+- `pkg/subenum`: `Scan` with `NoAbort` returns no error for a scan that ran to completion; the reliability warning is still sent by `Run` as a `KindError` event (#149).
+- `-simulate` no longer contacts crt.sh when `-ct` is set: CT seeding is skipped with a note, keeping the promise that nothing leaves the machine (#150).
+- `-diff` interrupted while re-checking previous names counts the names it never checked as unverified instead of still resolving (#151).
+- `-exclude` accepts internationalized patterns such as `mail.bücher.de` and matches them in punycode, as targets are scanned (#152).
+- `pkg/subenum`: a simulated scan with `Seed` 0 picks a random seed, as documented, instead of always using 0 (#154).
+- A resumed scan counts names it finds again after the resume point only once in `found` and `processed` (#156).
+- The TUI keeps reading scan events when the engine sends a kind it does not know, instead of stalling (#165).
+- `-resume=` with no path is a usage error, and `-resume` after `--` is treated as an argument (#166).
 - The TUI exits 1 when the results file could not be written, as the CLI does, instead of 0 with only an on-screen message (#155).
 - `-print-config` shows the `attempts` value a scan actually uses: `1` by default instead of the raw `0` sentinel, and the `-retries` value (marked `from retries`) when that is what wins (#153).
 - `tools/wordlist-gen` parses flags that appear after a positional the same way `subenum` does, instead of silently ignoring both: a leftover argument is now a usage error (2) that points at `-domain`, and an invalid `-combine` value or an empty `-o` exits 2 instead of 1 (#120).
