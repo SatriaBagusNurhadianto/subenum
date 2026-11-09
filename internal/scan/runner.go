@@ -578,221 +578,16 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 		}
 	}()
 
-	// Dispatcher: owns the expansion queue, the visited set (loop/dup
-	// protection), and the pending-work counter. It closes jobs when no
-	// candidates remain and every dispatched job has completed, or when the
-	// context is cancelled.
-	//
-	// Candidates are generated lazily. The queue holds expansions (a parent
-	// plus a cursor into cfg.Entries) rather than one job per name, so depth-1
-	// names are built only as they are dispatched and a found parent costs one
-	// enqueue instead of len(Entries) (#49). Once -max-queries is reached the
-	// remaining candidates are counted, never built or recorded (#51).
-	go func() {
-		n := len(cfg.Entries)
-		visited := make(map[string]struct{}, n)
-		start := min(max(cfg.ResumeFrom, 0), n)
-		frontier := []expansion{{parent: cfg.Domain, depth: 1, next: start}}
-		head := 0
-		remaining := n - start // candidates not yet generated
-		// Resumed recursive scans re-expand the names found before the
-		// interrupt, whose children may not all have been tested (#73).
-		if cfg.Recursive {
-			rootLabels := strings.Count(cfg.Domain, ".") + 1
-			for _, p := range cfg.ResumeParents {
-				p = strings.ToLower(strings.TrimSuffix(p, "."))
-				if !strings.HasSuffix(p, "."+cfg.Domain) {
-					continue
-				}
-				if d := strings.Count(p, ".") + 1 - rootLabels; d >= 1 && d < maxDepth {
-					frontier = append(frontier, expansion{parent: p, depth: d + 1})
-					remaining += n
-				}
-			}
-		}
-		// Resume point: rootDone[i-start] is set once entry i is settled
-		// (looked up, or skipped as a duplicate or out of scope); watermark is
-		// the first index not yet settled.
-		rootDone := make([]bool, n-start)
-		watermark := start
-		settle := func(i int) {
-			if i < start {
-				return
-			}
-			rootDone[i-start] = true
-			for watermark < n && rootDone[watermark-start] {
-				watermark++
-			}
-		}
-		admitted := 0
-		skipped := 0
-		excluded := 0
-		capped := false
-		expired := false
-		pending := 0 // dispatched jobs not yet completed
-
-		// stopAdmitting ends admission for a budget: every candidate not yet
-		// generated, and every child a later find would add, is skipped.
-		stopAdmitting := func() {
-			skipped += remaining
-			remaining = 0
-			capped = true
-			frontier, head = nil, 0
-		}
-		// The deadline timer wakes the dispatcher while it waits on a busy
-		// worker pool, so the budget holds even if no job completes (#190).
-		var deadline <-chan time.Time
-		if !cfg.Deadline.IsZero() {
-			timer := time.NewTimer(time.Until(cfg.Deadline))
-			defer timer.Stop()
-			deadline = timer.C
-		}
-
-		publishTotal := func() {
-			t := admitted + remaining
-			if cfg.MaxQueries > 0 && t > cfg.MaxQueries {
-				t = cfg.MaxQueries
-			}
-			atomic.StoreInt64(&total, int64(t))
-		}
-		// next generates the next admissible job, if any.
-		next := func() (job, bool) {
-			for head < len(frontier) {
-				e := &frontier[head]
-				if e.next == n {
-					head++
-					// Compact only once the consumed prefix is at least half
-					// the slice, so each element is copied O(1) times.
-					if head == len(frontier) {
-						frontier, head = frontier[:0], 0
-					} else if head*2 >= len(frontier) {
-						frontier, head = append(frontier[:0], frontier[head:]...), 0
-					}
-					continue
-				}
-				if cfg.pastDeadline() {
-					expired = true
-					stopAdmitting()
-					return job{}, false
-				}
-				if cfg.MaxQueries > 0 && admitted >= cfg.MaxQueries {
-					stopAdmitting()
-					return job{}, false
-				}
-				entry := cfg.Entries[e.next]
-				e.next++
-				remaining--
-				name := entry + "." + e.parent
-				// Key by the name relative to the root domain. For depth 1 that
-				// is the entry itself, so no extra string is retained.
-				key := entry
-				if e.depth > 1 {
-					key = name[:len(name)-len(cfg.Domain)-1]
-				}
-				root := -1
-				if e.depth == 1 {
-					root = e.next - 1
-				}
-				if _, dup := visited[key]; dup {
-					settle(root)
-					continue
-				}
-				visited[key] = struct{}{}
-				if sc.excluded(name) {
-					excluded++
-					settle(root)
-					continue
-				}
-				admitted++
-				return job{domain: name, depth: e.depth, root: root}, true
-			}
-			return job{}, false
-		}
-		closeJobs := func() {
-			stats.skipped.Store(int64(skipped))
-			stats.rootDone.Store(int64(watermark))
-			stats.excluded.Store(int64(excluded))
-			expired = expired && skipped > 0 // a deadline that left nothing untested changed nothing
-			stats.expired.Store(expired)
-			if skipped > 0 {
-				msg := fmt.Sprintf("query cap reached ({max_queries} %d); skipped %d additional jobs", cfg.MaxQueries, skipped)
-				if expired {
-					msg = fmt.Sprintf("time budget reached ({max_duration}); skipped %d additional jobs", skipped)
-				}
-				select {
-				case events <- Event{Kind: EventNotice, Notice: NoticeCap, Message: msg}:
-				case <-ctx.Done():
-				}
-			}
-			close(jobs)
-		}
-
-		var ready job
-		haveReady := false
-		for {
-			if !haveReady {
-				ready, haveReady = next()
-				publishTotal()
-			}
-			if !haveReady && pending == 0 {
-				closeJobs()
-				return
-			}
-			var out chan job
-			if haveReady {
-				out = jobs
-			}
-			select {
-			case <-ctx.Done():
-				closeJobs()
-				return
-			case parent := <-enqueue:
-				if capped {
-					skipped += n
-					continue
-				}
-				// Every child would be out of scope: count them, build none.
-				if sc.subtreeExcluded(parent.domain) {
-					excluded += n
-					continue
-				}
-				frontier = append(frontier, expansion{parent: parent.domain, depth: parent.depth + 1})
-				remaining += n
-				publishTotal()
-			case out <- ready:
-				haveReady = false
-				pending++
-			case <-deadline:
-				deadline = nil
-				if !capped {
-					expired = true
-					// The held job was admitted but never dispatched.
-					if haveReady {
-						haveReady = false
-						admitted--
-						skipped++
-					}
-					stopAdmitting()
-				}
-			case c := <-completed:
-				pending--
-				if c.skipped {
-					skipped++
-					admitted-- // never looked up, so not part of the total
-					publishTotal()
-					if !capped {
-						expired = true
-						stopAdmitting()
-					}
-				}
-				if c.finished {
-					settle(c.root)
-				}
-			}
-		}
-	}()
+	// The dispatcher hands out candidates and closes jobs once every
+	// dispatched job has completed, or ctx is cancelled (see dispatcher).
+	go newDispatcher(cfg, maxDepth).run(ctx, jobs, enqueue, completed, &total, &stats, events)
 
 	// Worker pool.
+	st := &scanState{
+		cfg: cfg, maxDepth: maxDepth, limiter: jobLimiter, events: events, enqueue: enqueue,
+		processed: &processed, found: &found, stats: &stats, cancel: cancel, guardOnce: &guardOnce,
+		fp: fingerprint, wc: wc,
+	}
 	workers := workerCount(cfg, maxDepth)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -808,7 +603,7 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 					}
 					continue
 				}
-				finished := processJob(ctx, cfg, j, maxDepth, jobLimiter, events, enqueue, &processed, &found, &stats, cancel, &guardOnce, fingerprint, wc)
+				finished := st.processJob(ctx, j)
 				select {
 				case completed <- completion{root: j.root, finished: finished}:
 				case <-ctx.Done():
@@ -842,13 +637,30 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 	}
 }
 
+// scanState is what every worker shares during one scan (#159).
+type scanState struct {
+	cfg       Config
+	maxDepth  int
+	limiter   *dns.RateLimiter // paces simulated and hooked jobs; nil for live lookups, which pace per query
+	events    chan<- Event
+	enqueue   chan<- job // found parents, for the dispatcher to expand
+	processed *int64     // atomic
+	found     *int64     // atomic
+	stats     *counters
+	cancel    context.CancelFunc // the reliability guard's abort
+	guardOnce *sync.Once
+	fp        *fingerprint
+	wc        *wildcardCache
+}
+
 // processJob resolves a single job and, on success, optionally enqueues
 // depth-capped children for recursive enumeration.
-func processJob(ctx context.Context, cfg Config, j job, maxDepth int, limiter *dns.RateLimiter, events chan<- Event, enqueue chan<- job, processed, found *int64, st *counters, cancel context.CancelFunc, guardOnce *sync.Once, fp *fingerprint, wc *wildcardCache) (finished bool) {
+func (s *scanState) processJob(ctx context.Context, j job) (finished bool) {
+	cfg, st, maxDepth := s.cfg, s.stats, s.maxDepth
 	if ctx.Err() != nil {
 		return false
 	}
-	if err := limiter.Wait(ctx); err != nil {
+	if err := s.limiter.Wait(ctx); err != nil {
 		return false
 	}
 
@@ -878,22 +690,20 @@ func processJob(ctx context.Context, cfg Config, j job, maxDepth int, limiter *d
 		return false
 	}
 
-	if outcome == dns.OutcomeFound && isWildcardAnswer(ctx, cfg, fp, j.domain, records) {
+	if outcome == dns.OutcomeFound && isWildcardAnswer(ctx, cfg, s.fp, j.domain, records) {
 		st.wildcardFiltered.Add(1)
-		n := atomic.AddInt64(processed, 1)
-		checkReliability(cfg, n, st, events, cancel, guardOnce)
+		s.checkReliability(atomic.AddInt64(s.processed, 1))
 		return true
 	}
 
 	st.add(outcome)
-	n := atomic.AddInt64(processed, 1)
-	checkReliability(cfg, n, st, events, cancel, guardOnce)
+	s.checkReliability(atomic.AddInt64(s.processed, 1))
 
 	if outcome != dns.OutcomeFound {
 		return true
 	}
 
-	atomic.AddInt64(found, 1)
+	atomic.AddInt64(s.found, 1)
 	// Unguarded: CLI and TUI drain until close. A ctx.Done() guard here would
 	// only matter for a consumer that stops reading with a full buffer.
 	// A CNAME result gets a DNS-only takeover hint; its target is resolved
@@ -905,28 +715,28 @@ func processJob(ctx context.Context, cfg Config, j job, maxDepth int, limiter *d
 	if takeover != "" {
 		st.takeover.Add(1)
 	}
-	events <- Event{Kind: EventResult, Domain: j.domain, Records: records, Takeover: takeover}
+	s.events <- Event{Kind: EventResult, Domain: j.domain, Records: records, Takeover: takeover}
 
 	if cfg.Recursive && j.depth < maxDepth {
 		// The wildcard probe would query inside the branch, so an out-of-scope
 		// subtree is not probed; the dispatcher counts its children as excluded.
 		if !cfg.Simulate && cfg.resolveHook == nil && !cfg.scope.subtreeExcluded(j.domain) {
-			isWild, err := wc.isWildcard(ctx, cfg, j.domain)
+			isWild, err := s.wc.isWildcard(ctx, cfg, j.domain)
 			if ctx.Err() != nil {
 				return true
 			}
 			if err != nil {
-				events <- Event{Kind: EventNotice, Notice: NoticeSkip, Message: "skipping recursive expansion of " + j.domain + ": wildcard check failed: " + err.Error()}
+				s.events <- Event{Kind: EventNotice, Notice: NoticeSkip, Message: "skipping recursive expansion of " + j.domain + ": wildcard check failed: " + err.Error()}
 				return true
 			}
 			if isWild {
-				events <- Event{Kind: EventNotice, Notice: NoticeSkip, Message: "wildcard DNS at " + j.domain + "; skipping recursive expansion"}
+				s.events <- Event{Kind: EventNotice, Notice: NoticeSkip, Message: "wildcard DNS at " + j.domain + "; skipping recursive expansion"}
 				return true
 			}
 		}
 		// Hand the parent to the dispatcher, which generates its children.
 		select {
-		case enqueue <- j:
+		case s.enqueue <- j:
 		case <-ctx.Done():
 		}
 	}
@@ -965,7 +775,11 @@ func resolveViaPool(ctx context.Context, cfg Config, name string, st *counters) 
 	return records, trusted
 }
 
-func checkReliability(cfg Config, processed int64, st *counters, events chan<- Event, cancel context.CancelFunc, once *sync.Once) {
+// checkReliability runs the reliability guard once processed lookups are
+// counted: past the failure threshold it reports once, and aborts the scan
+// unless NoAbort is set.
+func (s *scanState) checkReliability(processed int64) {
+	cfg, st := s.cfg, s.stats
 	if processed < reliabilityMinJobs {
 		return
 	}
@@ -974,7 +788,7 @@ func checkReliability(cfg Config, processed int64, st *counters, events chan<- E
 	if failures*100 <= processed*int64(reliabilityFailPercent) {
 		return
 	}
-	once.Do(func() {
+	s.guardOnce.Do(func() {
 		rate := float64(failures) * 100 / float64(processed)
 		verb := "aborting scan"
 		if cfg.NoAbort {
@@ -982,10 +796,10 @@ func checkReliability(cfg Config, processed int64, st *counters, events chan<- E
 		}
 		msg := fmt.Sprintf("%s: %.0f%% of %d queries failed (timeout/refused/other); likely resolver rate-limiting at {concurrency} %d and {rate} %d",
 			verb, rate, processed, cfg.Concurrency, cfg.Rate)
-		events <- Event{Kind: EventError, Message: msg}
+		s.events <- Event{Kind: EventError, Message: msg}
 		if !cfg.NoAbort {
 			st.aborted.Store(true)
-			cancel()
+			s.cancel()
 		}
 	})
 }
