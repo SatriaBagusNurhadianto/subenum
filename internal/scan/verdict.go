@@ -41,6 +41,8 @@ func (s Stats) Verdict(interrupted bool) (verdict, reason string) {
 		return VerdictDegraded, fmt.Sprintf("interrupted after %d lookups", processed)
 	case fails > 0 && fails*100 >= processed*degradedFailPercent:
 		return VerdictDegraded, detail
+	case s.Skipped > 0 && s.Expired:
+		return VerdictDegraded, fmt.Sprintf("time budget ({max_duration}) reached; %d candidates not tested", s.Skipped)
 	case s.Skipped > 0:
 		return VerdictDegraded, fmt.Sprintf("{max_queries} reached; %d candidates not tested", s.Skipped)
 	case fails > 0:

@@ -20,6 +20,7 @@ const (
 	SettingDepth       Setting = "depth"
 	SettingRate        Setting = "rate"
 	SettingMaxQueries  Setting = "max_queries"
+	SettingMaxDuration Setting = "max_duration"
 	SettingExclude     Setting = "exclude"
 	SettingRecursive   Setting = "recursive"
 	SettingForce       Setting = "force"
@@ -28,7 +29,7 @@ const (
 // Settings lists every Setting, for front ends to check their name tables.
 var Settings = []Setting{
 	SettingConcurrency, SettingTimeout, SettingAttempts, SettingHitRate, SettingDepth,
-	SettingRate, SettingMaxQueries, SettingExclude, SettingRecursive, SettingForce,
+	SettingRate, SettingMaxQueries, SettingMaxDuration, SettingExclude, SettingRecursive, SettingForce,
 }
 
 // Ref is the setting's token, to put in a message.
@@ -60,6 +61,8 @@ func FlagName(s Setting) string {
 		return "-hit-rate"
 	case SettingMaxQueries:
 		return "-max-queries"
+	case SettingMaxDuration:
+		return "-max-duration"
 	case SettingTimeout, SettingAttempts, SettingDepth, SettingRate, SettingExclude, SettingRecursive, SettingForce:
 		return "-" + string(s)
 	}

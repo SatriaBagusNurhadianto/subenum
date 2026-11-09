@@ -100,6 +100,12 @@ type Config struct {
 	// MaxQueries caps how many candidate names are tested. 0 is unlimited.
 	MaxQueries int
 
+	// MaxDuration is a time budget, counted from when Run starts. Once it
+	// runs out no new name is looked up, lookups already under way finish,
+	// and the names left are counted in Stats.Skipped with Stats.Expired
+	// set. 0 is unlimited.
+	MaxDuration time.Duration
+
 	// Exclude lists names that are out of scope and are never queried.
 	// "mail.example.com" excludes one name; "*.corp.example.com" excludes
 	// a whole branch.
@@ -172,7 +178,7 @@ type Stats struct {
 	WildcardFiltered int64 // resolved, but matched the wildcard fingerprint
 
 	QueriesSent int64 // DNS queries sent, retries included; 0 when simulated
-	Skipped     int64 // candidates left untested because MaxQueries was reached
+	Skipped     int64 // candidates left untested because MaxQueries or MaxDuration was reached
 	Excluded    int64 // candidates left untested because Exclude covered them
 	Takeover    int64 // results carrying a Takeover hint
 
@@ -183,6 +189,10 @@ type Stats struct {
 	// Aborted reports that the reliability guard stopped the scan early,
 	// so the results are incomplete and the negatives mean nothing.
 	Aborted bool
+
+	// Expired reports that MaxDuration ran out before every candidate was
+	// tested; Skipped counts the ones left.
+	Expired bool
 
 	// Wildcard reports that the domain answers every name. Only Force
 	// lets such a scan run.
@@ -253,7 +263,8 @@ const (
 	// NoticeWildcard means the domain answers every name, or that the
 	// wildcard check itself failed under Force.
 	NoticeWildcard
-	// NoticeCap means MaxQueries was reached and candidates were skipped.
+	// NoticeCap means MaxQueries or MaxDuration was reached and candidates
+	// were skipped.
 	NoticeCap
 	// NoticeCeiling means a recursive scan could generate a very large
 	// number of queries.
@@ -463,6 +474,8 @@ func (c Config) options() (scan.Options, error) {
 		return scan.Options{}, fmt.Errorf("subenum: Rate must be 0 (unlimited) or positive, got %d", c.Rate)
 	case c.MaxQueries < 0:
 		return scan.Options{}, fmt.Errorf("subenum: MaxQueries must be 0 (unlimited) or positive, got %d", c.MaxQueries)
+	case c.MaxDuration < 0:
+		return scan.Options{}, fmt.Errorf("subenum: MaxDuration must be 0 (unlimited) or positive, got %s", c.MaxDuration)
 	case c.Depth < 0:
 		return scan.Options{}, fmt.Errorf("subenum: Depth must not be negative, got %d", c.Depth)
 	case c.Simulate && c.HitRate != 0 && (c.HitRate < 1 || c.HitRate > 100):
@@ -515,6 +528,9 @@ func (c Config) options() (scan.Options, error) {
 		NoAbort:     c.NoAbort,
 		Verbose:     c.Verbose,
 		Logf:        dns.Logf(c.Logf),
+	}
+	if c.MaxDuration > 0 {
+		opts.Deadline = time.Now().Add(c.MaxDuration)
 	}
 
 	if len(c.ResolverPool) > 0 {
@@ -587,6 +603,7 @@ var configFields = map[scan.Setting]string{
 	scan.SettingDepth:       "Depth",
 	scan.SettingRate:        "Rate",
 	scan.SettingMaxQueries:  "MaxQueries",
+	scan.SettingMaxDuration: "MaxDuration",
 	scan.SettingExclude:     "Exclude",
 	scan.SettingRecursive:   "Recursive",
 	scan.SettingForce:       "Force",
@@ -669,6 +686,7 @@ func stats(s scan.Stats) Stats {
 		Unconfirmed: s.Unconfirmed,
 
 		Aborted:             s.Aborted,
+		Expired:             s.Expired,
 		Wildcard:            s.Wildcard,
 		WildcardFingerprint: records(s.Fingerprint),
 	}

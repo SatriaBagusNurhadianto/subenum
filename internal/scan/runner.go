@@ -42,7 +42,12 @@ type Config struct {
 	Depth       int      // max recursion depth (1 = no recursion)
 	NoAbort     bool     // keep scanning after the reliability guard fires
 	MaxQueries  int      // cap on admitted candidate names (jobs), not wire queries (0 = unlimited)
-	Exclude     []string // out-of-scope names and *.parent patterns; never queried (#87)
+	// Deadline stops admitting candidates at this instant (-max-duration,
+	// #190); lookups in flight finish and the rest are counted as skipped.
+	// It is an instant rather than a duration so one budget can span every
+	// target of a -dL run. Zero means no limit.
+	Deadline time.Time
+	Exclude  []string // out-of-scope names and *.parent patterns; never queried (#87)
 
 	// Resuming an interrupted scan (#73): ResumeFrom skips the wordlist
 	// entries before it (Stats.RootDone of the interrupted run), and
@@ -87,7 +92,7 @@ type Stats struct {
 
 	// Run facts for the quality report (#70); not part of Sum.
 	QueriesSent int64 // DNS queries dialed, retries included (0 when simulated)
-	Skipped     int64 // candidates not tested because -max-queries was reached
+	Skipped     int64 // candidates not tested because -max-queries or -max-duration was reached
 	Excluded    int64 // candidates not tested because -exclude put them out of scope
 	PoolHits    int64 // names a pool resolver said exist (-r)
 	Confirmed   int64 // pool hits the trusted resolver confirmed
@@ -98,6 +103,7 @@ type Stats struct {
 	// done; resuming repeats at most a worker pool's worth of lookups.
 	RootDone    int64
 	Aborted     bool         // the reliability guard cancelled the scan
+	Expired     bool         // Deadline (-max-duration) stopped admission; Skipped counts what it left
 	Wildcard    bool         // the root domain is a wildcard (scanned under -force)
 	Fingerprint []dns.Record // final wildcard fingerprint, empty when none
 }
@@ -127,6 +133,7 @@ type counters struct {
 	takeover         atomic.Int64
 	rootDone         atomic.Int64
 	aborted          atomic.Bool
+	expired          atomic.Bool
 }
 
 func (c *counters) add(o dns.Outcome) {
@@ -162,6 +169,7 @@ func (c *counters) snapshot() Stats {
 		Takeover:         c.takeover.Load(),
 		RootDone:         c.rootDone.Load(),
 		Aborted:          c.aborted.Load(),
+		Expired:          c.expired.Load(),
 	}
 }
 
@@ -320,10 +328,17 @@ type job struct {
 
 // completion reports a job back to the dispatcher. finished is false when
 // the lookup was cut short by cancellation, so it does not count toward the
-// resume point.
+// resume point. skipped means the worker took the job after the Deadline and
+// never looked it up.
 type completion struct {
 	root     int
 	finished bool
+	skipped  bool
+}
+
+// pastDeadline reports whether the -max-duration budget has run out (#190).
+func (c Config) pastDeadline() bool {
+	return !c.Deadline.IsZero() && !time.Now().Before(c.Deadline)
 }
 
 // expansion is a pending run of candidates: every cfg.Entries[next:] prepended
@@ -360,7 +375,7 @@ const (
 	// NoticeWildcard means wildcard DNS was detected, or its check failed
 	// under -force.
 	NoticeWildcard NoticeKind = iota + 1
-	NoticeCap                 // -max-queries reached; candidates skipped
+	NoticeCap                 // -max-queries or -max-duration reached; candidates skipped
 	NoticeCeiling             // recursive scan may generate very many queries
 	NoticeSkip                // a recursive branch was not expanded
 )
@@ -613,7 +628,25 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 		skipped := 0
 		excluded := 0
 		capped := false
+		expired := false
 		pending := 0 // dispatched jobs not yet completed
+
+		// stopAdmitting ends admission for a budget: every candidate not yet
+		// generated, and every child a later find would add, is skipped.
+		stopAdmitting := func() {
+			skipped += remaining
+			remaining = 0
+			capped = true
+			frontier, head = nil, 0
+		}
+		// The deadline timer wakes the dispatcher while it waits on a busy
+		// worker pool, so the budget holds even if no job completes (#190).
+		var deadline <-chan time.Time
+		if !cfg.Deadline.IsZero() {
+			timer := time.NewTimer(time.Until(cfg.Deadline))
+			defer timer.Stop()
+			deadline = timer.C
+		}
 
 		publishTotal := func() {
 			t := admitted + remaining
@@ -637,11 +670,13 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 					}
 					continue
 				}
+				if cfg.pastDeadline() {
+					expired = true
+					stopAdmitting()
+					return job{}, false
+				}
 				if cfg.MaxQueries > 0 && admitted >= cfg.MaxQueries {
-					skipped += remaining
-					remaining = 0
-					capped = true
-					frontier, head = nil, 0
+					stopAdmitting()
 					return job{}, false
 				}
 				entry := cfg.Entries[e.next]
@@ -677,10 +712,15 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 			stats.skipped.Store(int64(skipped))
 			stats.rootDone.Store(int64(watermark))
 			stats.excluded.Store(int64(excluded))
+			expired = expired && skipped > 0 // a deadline that left nothing untested changed nothing
+			stats.expired.Store(expired)
 			if skipped > 0 {
+				msg := fmt.Sprintf("query cap reached ({max_queries} %d); skipped %d additional jobs", cfg.MaxQueries, skipped)
+				if expired {
+					msg = fmt.Sprintf("time budget reached ({max_duration}); skipped %d additional jobs", skipped)
+				}
 				select {
-				case events <- Event{Kind: EventNotice, Notice: NoticeCap, Message: fmt.Sprintf(
-					"query cap reached ({max_queries} %d); skipped %d additional jobs", cfg.MaxQueries, skipped)}:
+				case events <- Event{Kind: EventNotice, Notice: NoticeCap, Message: msg}:
 				case <-ctx.Done():
 				}
 			}
@@ -722,8 +762,29 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 			case out <- ready:
 				haveReady = false
 				pending++
+			case <-deadline:
+				deadline = nil
+				if !capped {
+					expired = true
+					// The held job was admitted but never dispatched.
+					if haveReady {
+						haveReady = false
+						admitted--
+						skipped++
+					}
+					stopAdmitting()
+				}
 			case c := <-completed:
 				pending--
+				if c.skipped {
+					skipped++
+					admitted-- // never looked up, so not part of the total
+					publishTotal()
+					if !capped {
+						expired = true
+						stopAdmitting()
+					}
+				}
 				if c.finished {
 					settle(c.root)
 				}
@@ -738,6 +799,15 @@ func Run(ctx context.Context, cfg Config, events chan<- Event) {
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
+				if cfg.pastDeadline() {
+					// Taken after the budget ran out: skip it, like the
+					// candidates the dispatcher never handed out (#190).
+					select {
+					case completed <- completion{root: j.root, skipped: true}:
+					case <-ctx.Done():
+					}
+					continue
+				}
 				finished := processJob(ctx, cfg, j, maxDepth, jobLimiter, events, enqueue, &processed, &found, &stats, cancel, &guardOnce, fingerprint, wc)
 				select {
 				case completed <- completion{root: j.root, finished: finished}:

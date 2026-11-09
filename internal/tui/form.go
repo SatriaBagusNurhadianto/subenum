@@ -500,6 +500,7 @@ func settingLabel(s scan.Setting) string {
 		scan.SettingDepth:       "Depth",
 		scan.SettingRate:        "Rate (qps)",
 		scan.SettingMaxQueries:  "Max Names",
+		scan.SettingMaxDuration: "Max Duration",
 		scan.SettingExclude:     "Exclude",
 		scan.SettingRecursive:   "Recursive",
 		scan.SettingForce:       "Force",

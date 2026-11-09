@@ -37,6 +37,14 @@ inputs:
     description: Write takeover candidates to this SARIF file, for github/codeql-action/upload-sarif. Needs CNAME in -type.
     required: false
     default: ""
+  max-duration:
+    description: >-
+      Time budget for the scan (-max-duration), e.g. 20m. Keep it under the
+      job's timeout-minutes: at the budget the scan stops testing new names
+      and still writes its results and report, with a degraded verdict.
+      Empty means no budget. Needs a subenum release newer than v0.10.0.
+    required: false
+    default: ""
   fail-on:
     description: "Fail the step when the verdict is at least this bad: unreliable, degraded or never."
     required: false
@@ -141,6 +149,7 @@ runs:
         PREVIOUS: ${{ inputs.previous }}
         BASELINE: ${{ inputs.baseline-artifact }}
         SARIF: ${{ inputs.sarif }}
+        MAX_DURATION: ${{ inputs.max-duration }}
         FAIL_ON: ${{ inputs.fail-on }}
       run: |
         set -o pipefail
@@ -149,6 +158,7 @@ runs:
         flags=(-silent -format jsonl -o "$out/results.jsonl" -stats "$out/run.json")
         [ -n "$WORDLIST" ] && flags+=(-w "$WORDLIST")
         [ -n "$SARIF" ] && flags+=(-sarif "$SARIF")
+        [ -n "$MAX_DURATION" ] && flags+=(-max-duration "$MAX_DURATION")
         prev="$PREVIOUS"
         if [ -z "$prev" ] && [ -n "$BASELINE" ] && [ -s "$RUNNER_TEMP/subenum-baseline/results.jsonl" ]; then
           prev="$RUNNER_TEMP/subenum-baseline/results.jsonl"

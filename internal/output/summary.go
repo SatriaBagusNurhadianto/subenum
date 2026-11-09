@@ -65,7 +65,10 @@ type TargetSummary struct {
 	Outcomes    Outcomes `json:"outcomes"`
 	QueriesSent int64    `json:"queries_sent"`
 	SkippedCap  int64    `json:"skipped_by_cap"`
-	Takeover    int64    `json:"takeover_candidates,omitempty"` // results with a takeover hint
+	// StoppedBy names the budget that skipped candidates: "queries"
+	// (-max-queries) or "duration" (-max-duration, #190). Empty when none did.
+	StoppedBy string `json:"stopped_by,omitempty"`
+	Takeover  int64  `json:"takeover_candidates,omitempty"` // results with a takeover hint
 	// Permutation is the -permute pass, when one ran (#72).
 	Permutation *PermutationSummary `json:"permutation,omitempty"`
 	// CTNames counts the Certificate Transparency names -ct added as

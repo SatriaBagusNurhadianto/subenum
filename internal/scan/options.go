@@ -27,6 +27,7 @@ type Options struct {
 	Depth       int
 	Rate        int
 	MaxQueries  int
+	Deadline    time.Time // -max-duration budget's end; zero = none (#190)
 	Exclude     []string
 	Pool        *dns.Pool // -r resolver pool; DNSServer is then the trusted resolver
 	// Resume point of an interrupted scan (#73); see Config.
@@ -86,6 +87,7 @@ func (o Options) Config() Config {
 		Depth:       o.Depth,
 		NoAbort:     o.NoAbort,
 		MaxQueries:  o.MaxQueries,
+		Deadline:    o.Deadline,
 		Exclude:     o.Exclude,
 		Pool:        o.Pool,
 

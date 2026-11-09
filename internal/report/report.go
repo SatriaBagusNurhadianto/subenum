@@ -88,6 +88,12 @@ func target(domain, status, errMsg string, done bool, final scan.Event) output.T
 	}
 	t.QueriesSent = st.QueriesSent
 	t.SkippedCap = st.Skipped
+	switch {
+	case st.Skipped > 0 && st.Expired:
+		t.StoppedBy = "duration"
+	case st.Skipped > 0:
+		t.StoppedBy = "queries"
+	}
 	t.Takeover = st.Takeover
 	t.PoolHits, t.Confirmed, t.Unconfirmed = st.PoolHits, st.Confirmed, st.Unconfirmed
 	t.Wildcard = st.Wildcard

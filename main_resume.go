@@ -118,9 +118,10 @@ func entryDigest(entries []string) string {
 }
 
 // unsavedSettings do not change what a scan queries, so a resume may differ
-// in them: the seed is pinned in the replayed arguments, and the rest only
-// change what is printed.
-var unsavedSettings = map[string]bool{"seed": true, "state": true, "v": true, "progress": true}
+// in them: the seed is pinned in the replayed arguments, -max-duration is a
+// budget for each invocation rather than for the scan (#190), and the rest
+// only change what is printed.
+var unsavedSettings = map[string]bool{"seed": true, "state": true, "v": true, "progress": true, "max-duration": true}
 
 // effectiveSettings returns every setting's effective value.
 func effectiveSettings(fs *flag.FlagSet) map[string]string {

@@ -267,6 +267,7 @@ make help           # list all targets
 | `-force` | `false` | Continue scanning even if wildcard DNS is detected |
 | `-no-abort` | `false` | Keep scanning after the 20% resolver failure-rate abort (warning is still emitted) |
 | `-max-queries <n>` | `0` | Max candidate names to test (0 = unlimited). Each name sends one query per record type per attempt (`CNAME` costs two) |
+| `-max-duration <d>` | `0` | Time budget for the whole run, e.g. `20m` (0 = unlimited). Then no new names are tested, lookups already under way finish, and the run ends normally with its results, report (`stopped_by: "duration"`) and a `degraded` verdict. Under `-dL` it covers all targets |
 | `-o <file>` | n/a | Write results to file in addition to stdout |
 | `-format <fmt>` | `text` | Output format: `text`, `json`, `jsonl` (one object per line, streamed), or `csv` |
 | `-show-records` | `false` | In `text` format, append each result's records as `TYPE=value` |
@@ -509,7 +510,7 @@ Every lookup is accounted for, and subenum says how far the results can be trust
 | Verdict | Meaning |
 |---------|---------|
 | `complete` | Under 1% of lookups failed and nothing was skipped |
-| `degraded` | Usable, but some names are unknown: 1-20% of lookups failed, `-max-queries` skipped candidates, or the run was interrupted |
+| `degraded` | Usable, but some names are unknown: 1-20% of lookups failed, `-max-queries` or `-max-duration` skipped candidates, or the run was interrupted |
 | `unreliable` | Over 20% of lookups failed (the reliability guard's threshold), the guard aborted the scan, or the target could not be scanned |
 
 The overall `verdict` is the worst target verdict. `queries_sent` counts DNS messages actually dialed, including retries; it is 0 in simulation mode. SERVFAIL and other errors Go's resolver does not distinguish are counted under `other`. With `-r`, each target also reports `pool_hits`, `confirmed` and `unconfirmed` (hits the trusted resolver denied, so they were dropped), and the top level gains `resolvers`: per-resolver `lookups`, `found`, `nxdomain`, `failed` and `benched` counts; `resolver` is then the trusted resolver. `excluded` counts candidates `-exclude` kept out of scope; they are never queried. `status` is one of `ok`, `failed`, `interrupted`, `skipped` or `not_run`. The `schema` number changes only when a field is renamed, removed or changes meaning; new fields can appear at any time.

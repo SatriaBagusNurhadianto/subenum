@@ -461,6 +461,70 @@ func TestRecursionCeiling(t *testing.T) {
 	}
 }
 
+// TestRunDeadlineStopsAdmission covers #190: once the -max-duration budget
+// runs out no new name is looked up, the lookup in flight finishes, the rest
+// are counted as skipped, and the scan still ends with one EventDone.
+func TestRunDeadlineStopsAdmission(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		budget        time.Duration
+		wantProcessed int64
+	}{
+		{name: "already past", budget: -time.Second, wantProcessed: 0},
+		{name: "runs out mid-scan", budget: 500 * time.Millisecond, wantProcessed: 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			deadline := time.Now().Add(c.budget)
+			var lookups atomic.Int64
+			cfg := Config{
+				Domain: "example.com", Entries: makeEntries(50), Concurrency: 1,
+				Timeout: time.Second, Simulate: true, Attempts: 1, Types: []string{"A"}, Deadline: deadline,
+				resolveHook: func(context.Context, string) ([]dns.Record, dns.Outcome) {
+					if lookups.Add(1) == 5 {
+						// The budget runs out during the fifth lookup.
+						time.Sleep(time.Until(deadline) + 20*time.Millisecond)
+					}
+					return nil, dns.OutcomeNXDomain
+				},
+			}
+			events := make(chan Event, 64)
+			go Run(context.Background(), cfg, events)
+			var dones int
+			var done Event
+			var notice string
+			for ev := range events {
+				switch ev.Kind {
+				case EventNotice:
+					if ev.Notice == NoticeCap {
+						notice = ev.Message
+					}
+				case EventDone:
+					dones++
+					done = ev
+				case EventError:
+					t.Fatalf("unexpected error: %s", ev.Message)
+				}
+			}
+			if dones != 1 {
+				t.Fatalf("%d done events, want 1", dones)
+			}
+			if done.Processed != c.wantProcessed || done.Stats.Skipped != 50-c.wantProcessed || !done.Stats.Expired {
+				t.Errorf("processed %d, skipped %d, expired %v; want %d, %d, true",
+					done.Processed, done.Stats.Skipped, done.Stats.Expired, c.wantProcessed, 50-c.wantProcessed)
+			}
+			if done.Total != c.wantProcessed {
+				t.Errorf("total %d, want %d: skipped names are not part of it", done.Total, c.wantProcessed)
+			}
+			if !strings.Contains(notice, "time budget reached ({max_duration})") {
+				t.Errorf("notice %q, want the time budget named", notice)
+			}
+			if v, reason := done.Stats.Verdict(false); v != VerdictDegraded || !strings.Contains(reason, "{max_duration}") {
+				t.Errorf("verdict %s (%s), want degraded naming the time budget", v, reason)
+			}
+		})
+	}
+}
+
 func TestRunMaxQueriesStopsAdmission(t *testing.T) {
 	cfg := Config{
 		Domain:      "example.com",

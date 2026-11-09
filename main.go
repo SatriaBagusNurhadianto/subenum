@@ -143,6 +143,8 @@ type cliFlags struct {
 	depth        int
 	noAbort      bool
 	maxQueries   int
+	maxDuration  time.Duration // -max-duration: time budget for the whole run (#190)
+	deadline     time.Time     // when maxDuration runs out; set once the scans start
 	statsFile    string
 	sarifFile    string // -sarif: takeover candidates as SARIF (#129)
 	exclude      string
@@ -198,6 +200,7 @@ func parseFlagsWith(args []string, applyDefaults func(*flag.FlagSet) error) (cli
 	fs.IntVar(&f.depth, "depth", 1, "Max recursion depth when -recursive is set (1 = no recursion)")
 	fs.BoolVar(&f.noAbort, "no-abort", false, "Do not abort when the resolver failure rate exceeds 20% (warning is still emitted)")
 	fs.IntVar(&f.maxQueries, "max-queries", 0, "Max candidate names to test (0 = unlimited); each name sends one query per record type, per attempt")
+	fs.DurationVar(&f.maxDuration, "max-duration", 0, "Time budget for the whole run, e.g. 20m (0 = unlimited); then no new names are tested, lookups in flight finish, and the run ends with its report and a degraded verdict")
 	fs.StringVar(&f.statsFile, "stats", "", "Write a JSON run-quality report (outcomes, queries sent, verdict) to this file")
 	fs.StringVar(&f.sarifFile, "sarif", "", "Write takeover candidates to this file as SARIF 2.1.0, for GitHub code scanning (needs CNAME in -type)")
 	fs.StringVar(&f.exclude, "exclude", "", "Comma-separated out-of-scope names and *.parent patterns; never queried or expanded")
@@ -328,6 +331,10 @@ func validateFlags(f cliFlags, positionals []string, fs *flag.FlagSet, out *outp
 	// Range and resolver checks are shared with the TUI (#80).
 	if err := scanOptions(f, "", nil, maxAttempts, nil, nil).Validate(); err != nil {
 		out.Error("%s", scan.Render(err.Error(), scan.FlagName))
+		return "", false
+	}
+	if f.maxDuration < 0 {
+		out.Error("-max-duration must be 0 (unlimited) or positive, got %s", f.maxDuration)
 		return "", false
 	}
 	if f.concurrency > highConcurrency {
@@ -873,6 +880,11 @@ func run() (code int) {
 	entryDigests := make([]string, len(targets))        // per target, for -resume state
 	failedTargets := 0
 	started := time.Now()
+	if f.maxDuration > 0 {
+		// One budget for the whole run: under -dL, later targets get what
+		// earlier ones left, and report what they skipped (#190).
+		f.deadline = started.Add(f.maxDuration)
+	}
 	for i, target := range targets {
 		if ctx.Err() != nil {
 			break
@@ -1100,6 +1112,7 @@ func scanOptions(f cliFlags, domain string, entries []string, maxAttempts int, r
 		Depth:       f.depth,
 		Rate:        f.rate,
 		MaxQueries:  f.maxQueries,
+		Deadline:    f.deadline,
 		Exclude:     f.excludes,
 		ResumeFrom:  f.resumeFrom,
 		// Names found before an interrupt still need their children expanded.

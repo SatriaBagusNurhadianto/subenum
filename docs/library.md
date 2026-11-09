@@ -74,6 +74,7 @@ Read the channel until it closes, or cancel `ctx`. Breaking out of the loop with
 | `Types` | `A`, `AAAA` | Record types. `CNAME` populates `Result.Takeover`. |
 | `Recursive`, `Depth` | off, `1` | Enumerate again under each name found. |
 | `MaxQueries` | unlimited | Cap on candidate names tested. |
+| `MaxDuration` | unlimited | Time budget from the start of `Run`. Then no new names are tested and the rest are counted in `Stats.Skipped`, with `Stats.Expired` set. |
 | `Exclude` | none | Out-of-scope names and `*.parent` branches, never queried. |
 | `Force` | off | Scan a wildcard zone, dropping answers that match its fingerprint. |
 | `NoAbort` | off | Keep going when more than a fifth of lookups fail. `Run` still sends the warning as a `KindError` event; `Scan` returns no error for a scan that finished. |

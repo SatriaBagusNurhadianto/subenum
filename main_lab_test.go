@@ -120,6 +120,44 @@ func TestE2ELabVerdicts(t *testing.T) {
 	}
 }
 
+// TestE2EMaxDuration covers #190: a run that hits its time budget still ends
+// with a report, a degraded verdict and stopped_by "duration", and a negative
+// budget is a usage error.
+func TestE2EMaxDuration(t *testing.T) {
+	stats := filepath.Join(t.TempDir(), "run.json")
+	// -rate 10 with 30 words needs about 3 s; the budget is a third of that.
+	code, out := runCLI(t, "", "-progress=false", "-w", "examples/labs/words.txt", "-t", "2", "-rate", "10",
+		"-max-duration", "1s", "-stats", stats, "-simulate-zone", filepath.Join("examples", "labs", "lab1-first-scan.zone"), "lab.example")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	data, err := os.ReadFile(stats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum struct {
+		Verdict string `json:"verdict"`
+		Reason  string `json:"reason"`
+		Targets []struct {
+			Skipped   int64  `json:"skipped_by_cap"`
+			StoppedBy string `json:"stopped_by"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(data, &sum); err != nil {
+		t.Fatal(err)
+	}
+	if sum.Verdict != "degraded" || !strings.Contains(sum.Reason, "-max-duration") {
+		t.Errorf("verdict %q (%s), want degraded naming -max-duration", sum.Verdict, sum.Reason)
+	}
+	if len(sum.Targets) != 1 || sum.Targets[0].StoppedBy != "duration" || sum.Targets[0].Skipped == 0 {
+		t.Errorf("targets %+v, want one stopped by duration with names skipped", sum.Targets)
+	}
+
+	if code, _ := runCLI(t, "", "-simulate", "-max-duration", "-1s", "example.com"); code != exitUsage {
+		t.Errorf("negative -max-duration: exit %d, want %d", code, exitUsage)
+	}
+}
+
 // TestE2ELabTakeoverHint checks lab 1's dangling CNAME: the external target
 // does not exist in the lab, so the result is flagged.
 func TestE2ELabTakeoverHint(t *testing.T) {

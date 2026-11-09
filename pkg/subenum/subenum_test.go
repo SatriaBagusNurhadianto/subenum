@@ -417,6 +417,29 @@ func TestRateLimitIsApplied(t *testing.T) {
 	}
 }
 
+// TestMaxDuration covers #190: a scan that outlasts its budget returns
+// without an error, with the untested names counted and Expired set.
+func TestMaxDuration(t *testing.T) {
+	words := make([]string, 0, 40)
+	for i := range 40 {
+		words = append(words, fmt.Sprintf("w%d", i))
+	}
+	// 40 names at 10/s need 4 s; the budget allows about a tenth of that.
+	_, stats, err := subenum.Scan(context.Background(), subenum.Config{
+		Domain: "example.com", Words: words, Simulate: true, Seed: 1,
+		Concurrency: 1, Rate: 10, MaxDuration: 400 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.Expired || stats.Skipped == 0 || stats.Skipped+stats.Found+stats.NXDomain != 40 {
+		t.Errorf("stats %+v, want Expired with every name either tested or skipped", stats)
+	}
+	if _, _, err := subenum.Scan(context.Background(), subenum.Config{Domain: "example.com", Simulate: true, MaxDuration: -time.Second}); err == nil {
+		t.Error("negative MaxDuration accepted")
+	}
+}
+
 // TestNoAbortScanSucceedsDespiteFailingLookups covers #149: under NoAbort
 // the reliability guard only warns, so a completed Scan returns no error,
 // while Run still reports the warning.
