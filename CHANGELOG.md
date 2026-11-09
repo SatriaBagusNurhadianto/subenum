@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Tests no longer flake under load: lab end-to-end runs use a 5 s timeout with 3 attempts and fail with a clear message if the lab 2 wildcard probe times out, the resolver-pool spread test counts lookups per member instead of timing the scan (the timing view is now `BenchmarkPoolSpreadsLoad`), and CI runs tests in shuffled order (#167).
 
+### Fixed
+- On Windows, `-simulate-zone` labs and the test DNS server no longer fail to start about a quarter of the time with "no free UDP+TCP port pair": after a failed TCP bind the server retries on random ports instead of the next OS-assigned one, which stayed inside the same reserved port block (#204).
+
 ## [0.10.0] - 2026-11-08
 
 ### Changed

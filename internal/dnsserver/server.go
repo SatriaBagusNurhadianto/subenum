@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,32 +114,20 @@ func Listen(opts Options, h Handler) (*Server, error) {
 	if opts.IPv6 {
 		host = "::1"
 	}
-	// UDP and TCP must share a port (a truncated UDP answer is retried over
-	// TCP at the same address). The OS picks a free TCP port; the matching UDP
-	// port can still be taken or, on Windows, inside a reserved range, so try
-	// a few port pairs.
 	lc := &net.ListenConfig{}
-	var ln net.Listener
-	var pc net.PacketConn
-	var err error
-	// UDP is bound first: Windows reserves blocks of UDP ports, and binding
-	// UDP on a port the OS picked for TCP kept landing inside one.
-	for attempt := 0; attempt < 20; attempt++ {
-		pc, err = lc.ListenPacket(context.Background(), "udp", net.JoinHostPort(host, "0"))
-		if err != nil {
-			if opts.IPv6 {
-				return nil, fmt.Errorf("%w: %w", ErrNoIPv6, err)
-			}
-			return nil, fmt.Errorf("listen udp: %w", err)
-		}
-		ln, err = lc.Listen(context.Background(), "tcp", pc.LocalAddr().String())
-		if err == nil {
-			break
-		}
-		_ = pc.Close()
-	}
+	pc, ln, err := bindPair(host, pairListeners{
+		packet: func(addr string) (net.PacketConn, error) {
+			return lc.ListenPacket(context.Background(), "udp", addr)
+		},
+		stream: func(addr string) (net.Listener, error) {
+			return lc.Listen(context.Background(), "tcp", addr)
+		},
+	}, randomPort)
 	if err != nil {
-		return nil, fmt.Errorf("no free UDP+TCP port pair: %w", err)
+		if opts.IPv6 && !errors.Is(err, errNoPair) {
+			return nil, fmt.Errorf("%w: %w", ErrNoIPv6, err)
+		}
+		return nil, err
 	}
 	s := &Server{Addr: ln.Addr().String(), counts: map[countKey]int64{}, closers: []io.Closer{ln, pc}, conns: map[net.Conn]struct{}{}}
 
@@ -151,6 +141,54 @@ func Listen(opts Options, h Handler) (*Server, error) {
 		s.serveTCP(ln, h)
 	}()
 	return s, nil
+}
+
+// pairListeners binds one UDP and one TCP listener; tests replace it to
+// simulate ports that are taken or reserved.
+type pairListeners struct {
+	packet func(addr string) (net.PacketConn, error)
+	stream func(addr string) (net.Listener, error)
+}
+
+// errNoPair means every attempt to bind a UDP+TCP pair on one port failed.
+var errNoPair = errors.New("no free UDP+TCP port pair")
+
+// pairAttempts caps bindPair's tries.
+const pairAttempts = 32
+
+// randomPort returns a port in 20000-59999 for bindPair's later attempts.
+func randomPort() int { return 20000 + mrand.IntN(40000) }
+
+// bindPair binds UDP and TCP on the same loopback port: a truncated UDP
+// answer is retried over TCP at the same address. The first attempt lets the
+// OS pick the UDP port. Later attempts use random ports from next, because
+// the OS hands out ephemeral ports in sequence and, on Windows, retrying with
+// port 0 walks through one block of reserved TCP ports instead of leaving it
+// (#204). An error binding the OS-picked UDP port is returned as is: the
+// host cannot listen at all.
+func bindPair(host string, l pairListeners, next func() int) (net.PacketConn, net.Listener, error) {
+	var lastErr error
+	for attempt := 0; attempt < pairAttempts; attempt++ {
+		port := "0"
+		if attempt > 0 {
+			port = strconv.Itoa(next())
+		}
+		pc, err := l.packet(net.JoinHostPort(host, port))
+		if err != nil {
+			if attempt == 0 {
+				return nil, nil, fmt.Errorf("listen udp: %w", err)
+			}
+			lastErr = err
+			continue
+		}
+		ln, err := l.stream(pc.LocalAddr().String())
+		if err == nil {
+			return pc, ln, nil
+		}
+		_ = pc.Close()
+		lastErr = err
+	}
+	return nil, nil, fmt.Errorf("%w: %w", errNoPair, lastErr)
 }
 
 // Close stops the server: it closes the listeners and every open stream
