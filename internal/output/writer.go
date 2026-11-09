@@ -87,6 +87,7 @@ type Writer struct {
 	progressLen int       // width of the progress line currently on screen
 	lineMode    bool      // progress as whole lines, never carriage-return overwrites (#78)
 	quiet       bool      // -silent: Info and Progress print nothing (#128)
+	eta         ETA       // time left, appended to the progress line (#191)
 
 	seed           uint64 // simulation seed, named in the text file header
 	takeoverColumn bool   // CSV carries a takeover_candidate column
@@ -411,6 +412,9 @@ func (w *Writer) Progress(pct float64, processed, total, found int64) {
 		return
 	}
 	line := fmt.Sprintf("Progress: %.1f%% (%d/%d) | Found: %d ", pct, processed, total, found)
+	if left, ok := w.eta.Update(processed, total); ok {
+		line += "| ETA " + FormatETA(left) + " "
+	}
 	if w.lineMode {
 		_, _ = fmt.Fprintln(w.errOut(), strings.TrimSpace(line))
 		return

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/TMHSDigital/subenum/internal/dns"
+	"github.com/TMHSDigital/subenum/internal/output"
 	"github.com/TMHSDigital/subenum/internal/scan"
 )
 
@@ -60,6 +61,9 @@ type scanViewModel struct {
 	height    int
 	simMode   bool
 	seed      uint64 // simulation seed, shown so a TUI run can be reproduced
+
+	eta     *output.ETA // time-left estimator, as on the CLI progress line (#191)
+	etaText string      // "" until the estimate has warmed up
 }
 
 func newScanViewModel(width, height int, simMode bool) scanViewModel {
@@ -161,6 +165,13 @@ func (m scanViewModel) Update(msg tea.Msg) (scanViewModel, tea.Cmd) {
 		m.processed = msg.processed
 		m.total = msg.total
 		m.found = msg.found
+		m.etaText = ""
+		if m.eta == nil {
+			m.eta = &output.ETA{}
+		}
+		if left, ok := m.eta.Update(msg.processed, msg.total); ok {
+			m.etaText = output.FormatETA(left)
+		}
 		m.refresh()
 
 	case wildcardMsg:
@@ -239,10 +250,11 @@ func (m scanViewModel) View() string {
 		)) + "\n")
 		b.WriteString(hintStyle.Render("  r new scan  •  q quit"))
 	default:
-		b.WriteString(dimStyle.Render(fmt.Sprintf(
-			"  %d/%d processed  •  %d found",
-			m.processed, m.total, m.found,
-		)) + "\n")
+		status := fmt.Sprintf("  %d/%d processed  •  %d found", m.processed, m.total, m.found)
+		if m.etaText != "" {
+			status += "  •  ETA " + m.etaText
+		}
+		b.WriteString(dimStyle.Render(status) + "\n")
 		b.WriteString(hintStyle.Render("  ctrl+c to abort"))
 	}
 

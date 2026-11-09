@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -233,6 +234,24 @@ func TestRunLoadsWordlistAsync(t *testing.T) {
 
 // TestScanFailureStatusAndExitCode covers #55: a scan that ends with an error
 // shows "Failed", not "Aborted", and the TUI exits non-zero.
+// TestScanStatusShowsETA covers #191: the status bar shows the same time
+// estimate as the CLI progress line, once it has warmed up.
+func TestScanStatusShowsETA(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sv := newScanViewModel(120, 40, false)
+	sv.eta = &output.ETA{Now: func() time.Time { return now }}
+	for i := int64(0); i <= 6; i++ {
+		if i == 1 && strings.Contains(sv.View(), "ETA") {
+			t.Errorf("ETA shown during warm-up:\n%s", sv.View())
+		}
+		sv, _ = sv.Update(progressMsg{processed: i * 10, total: 1000})
+		now = now.Add(time.Second)
+	}
+	if !strings.Contains(sv.View(), "ETA 1m34s") {
+		t.Errorf("status bar without the ETA:\n%s", sv.View())
+	}
+}
+
 func TestScanFailureStatusAndExitCode(t *testing.T) {
 	update := func(sv scanViewModel, msgs ...tea.Msg) scanViewModel {
 		for _, msg := range msgs {
