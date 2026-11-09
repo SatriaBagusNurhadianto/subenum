@@ -1082,21 +1082,41 @@ func run() (code int) {
 			out.Info("NOTE: these results are SIMULATED; no DNS queries were sent (seed %d).", f.seed)
 		}
 	}
-	if c := signalCode.Load(); c != 0 {
-		// Shell convention 128+signum: partial results were flushed above,
-		// but callers can tell an interrupted scan apart from success or failure.
-		return int(c)
+	ending := runEnding{
+		signal: signalCode.Load(), fileErr: fileErrReported,
+		targets: len(targets), failedTargets: failedTargets, anyFailed: anyFailed,
 	}
-	if fileErrReported {
+	if diff != nil {
+		ending.changes = diff.added + diff.removed + diff.changed
+	}
+	return ending.exitCode()
+}
+
+// runEnding is what decides a finished run's exit code.
+type runEnding struct {
+	signal        int32 // 128+signum once a signal arrived, else 0
+	fileErr       bool  // writing an output, -stats or -sarif file failed
+	targets       int
+	failedTargets int  // targets that failed or were skipped
+	anyFailed     bool // a scan, wordlist or pass failed
+	changes       int  // -diff: names added, removed or changed
+}
+
+// exitCode applies the precedence: a signal (shell convention 128+signum:
+// partial results were flushed, but callers can tell an interrupted scan
+// apart), then a file error, then a partial -dL failure, then any failure,
+// then -diff changes.
+func (e runEnding) exitCode() int {
+	switch {
+	case e.signal != 0:
+		return int(e.signal)
+	case e.fileErr:
 		return exitFailure
-	}
-	if len(targets) > 1 && failedTargets > 0 && failedTargets < len(targets) {
+	case e.targets > 1 && e.failedTargets > 0 && e.failedTargets < e.targets:
 		return exitPartial
-	}
-	if anyFailed {
+	case e.anyFailed:
 		return exitFailure
-	}
-	if diff != nil && diff.added+diff.removed+diff.changed > 0 {
+	case e.changes > 0:
 		return exitChanges
 	}
 	return exitOK
